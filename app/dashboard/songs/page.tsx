@@ -1,232 +1,277 @@
 
 "use client";
 
-import { useEffect, useState } from "react";
-import { onAuthStateChanged, signOut } from "firebase/auth";
+import { FormEvent, useCallback, useEffect, useMemo, useState } from "react";
+import Link from "next/link";
+import { useRouter } from "next/navigation";
 import {
+  addDoc,
   collection,
   deleteDoc,
   doc,
   getDoc,
   getDocs,
+  serverTimestamp,
   Timestamp,
   updateDoc,
 } from "firebase/firestore";
-import { useRouter } from "next/navigation";
+import { onAuthStateChanged } from "firebase/auth";
+
+import {
+  Music2,
+  Search,
+  RefreshCw,
+  Plus,
+  Eye,
+  Pencil,
+  Trash2,
+  MoreVertical,
+  X,
+  Check,
+  AlertCircle,
+  ExternalLink,
+  ChevronDown,
+  FolderOpen,
+  CheckCircle2,
+  Circle,
+  ListMusic,
+  Clock3,
+} from "lucide-react";
+
 import { auth, db } from "@/lib/firebase";
 
 type Song = {
   id: string;
-  title?: string;
-  lyrics?: string;
-  category?: string;
-  youtubeUrl?: string;
-  createdAt?: unknown;
+  title: string;
+  lyrics: string;
+  category: string;
+  youtubeUrl: string;
+  isFavorite?: boolean;
+  isUserCreated?: boolean;
+  uploaderId?: string;
+  createdAt?: Timestamp | null;
+  timestamp?: Timestamp | null;
 };
 
-export default function SongsManagementPage() {
+type Category = {
+  id: string;
+  name: string;
+};
+
+type ModalType = "view" | "edit" | "add" | null;
+
+export default function SongsPage() {
   const router = useRouter();
 
-  const [checking, setChecking] = useState(true);
-  const [authorized, setAuthorized] = useState(false);
-
   const [songs, setSongs] = useState<Song[]>([]);
+  const [categories, setCategories] = useState<Category[]>([]);
+
+  const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
+  const [error, setError] = useState("");
+
   const [search, setSearch] = useState("");
-  const [category, setCategory] = useState("all");
-
-  const [selectedSong, setSelectedSong] = useState<Song | null>(null);
-
-  const [editingSong, setEditingSong] = useState<Song | null>(null);
-  const [editTitle, setEditTitle] = useState("");
-  const [editLyrics, setEditLyrics] = useState("");
-  const [editCategory, setEditCategory] = useState("");
-  const [editYoutubeUrl, setEditYoutubeUrl] = useState("");
+  const [categoryFilter, setCategoryFilter] = useState("all");
 
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
 
-  const [saving, setSaving] = useState(false);
-  const [deletingId, setDeletingId] = useState<string | null>(null);
-  const [bulkDeleting, setBulkDeleting] = useState(false);
+  const [modal, setModal] = useState<ModalType>(null);
+  const [selectedSong, setSelectedSong] = useState<Song | null>(null);
 
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [deleting, setDeleting] = useState(false);
+
+  // Add/Edit fields
+  const [title, setTitle] = useState("");
+  const [lyrics, setLyrics] = useState("");
+  const [category, setCategory] = useState("");
+  const [youtubeUrl, setYoutubeUrl] = useState("");
+
+  const [formError, setFormError] = useState("");
+
+  const loadData = useCallback(
+    async (showRefresh = false) => {
+      if (showRefresh) {
+        setRefreshing(true);
+      } else {
+        setLoading(true);
+      }
+
+      setError("");
+
+      try {
+        const user = auth.currentUser;
+
+        if (!user) {
+          router.replace("/");
+          return;
+        }
+
+        // Verify admin access using the current user's UID.
+        const adminRef = doc(db, "admins", user.uid);
+        const adminSnapshot = await getDoc(adminRef);
+
+        if (!adminSnapshot.exists()) {
+          router.replace("/");
+          return;
+        }
+
+        const adminData = adminSnapshot.data();
+
+        if (adminData.role !== "admin") {
+          router.replace("/");
+          return;
+        }
+
+        const [songsSnapshot, categoriesSnapshot] = await Promise.all([
+          getDocs(collection(db, "shared_songs")),
+          getDocs(collection(db, "categories")),
+        ]);
+
+        const loadedSongs: Song[] = songsSnapshot.docs.map((songDoc) => {
+          const data = songDoc.data();
+
+          return {
+            id: songDoc.id,
+            title: data.title || "",
+            lyrics: data.lyrics || "",
+            category: data.category || "",
+            youtubeUrl: data.youtubeUrl || "",
+            isFavorite: data.isFavorite,
+            isUserCreated: data.isUserCreated,
+            uploaderId: data.uploaderId,
+            createdAt: data.createdAt || null,
+            timestamp: data.timestamp || null,
+          };
+        });
+
+        const loadedCategories: Category[] = categoriesSnapshot.docs.map(
+          (categoryDoc) => {
+            const data = categoryDoc.data();
+
+            return {
+              id: categoryDoc.id,
+              name: data.name || "",
+            };
+          }
+        );
+
+        setSongs(loadedSongs);
+        setCategories(loadedCategories);
+      } catch (err) {
+        console.error("Songs loading error:", err);
+        setError("Unable to load songs. Please try again.");
+      } finally {
+        setLoading(false);
+        setRefreshing(false);
+      }
+    },
+    [router]
+  );
 
   useEffect(() => {
-    const unsubscribe = onAuthStateChanged(auth, async (user) => {
-      console.log("SONGS: Auth state:", user?.email);
-      console.log("SONGS: UID:", user?.uid);
-
+    const unsubscribe = onAuthStateChanged(auth, (user) => {
       if (!user) {
         router.replace("/");
         return;
       }
 
-      try {
-        const adminRef = doc(db, "admins", user.uid);
-        const adminSnap = await getDoc(adminRef);
-
-        console.log(
-          "SONGS: Admin document exists:",
-          adminSnap.exists()
-        );
-
-        if (!adminSnap.exists()) {
-          console.error("SONGS: Admin document not found.");
-
-          setError("You are not authorized to access the Netsir Admin.");
-          await signOut(auth);
-          router.replace("/");
-          return;
-        }
-
-        const adminData = adminSnap.data();
-
-        console.log("SONGS: Admin role:", adminData.role);
-
-        if (adminData.role !== "admin") {
-          setError("You are not authorized to access the Netsir Admin.");
-          await signOut(auth);
-          router.replace("/");
-          return;
-        }
-
-        setAuthorized(true);
-        setChecking(false);
-
-        await loadSongs();
-      } catch (err) {
-        console.error("SONGS: Admin verification failed:", err);
-
-        setError("Unable to verify administrator access.");
-        await signOut(auth);
-        router.replace("/");
-      }
+      loadData();
     });
 
     return () => unsubscribe();
-  }, [router]);
+  }, [loadData, router]);
 
-  async function loadSongs() {
-    setLoading(true);
-    setError("");
+  // Category options include both Firestore categories and categories
+  // already used by existing songs.
+  const categoryOptions = useMemo(() => {
+    const names = new Set<string>();
 
-    try {
-      const songsSnapshot = await getDocs(
-        collection(db, "shared_songs")
-      );
+    categories.forEach((item) => {
+      if (item.name.trim()) {
+        names.add(item.name.trim());
+      }
+    });
 
-      const loadedSongs: Song[] = songsSnapshot.docs.map((document) => ({
-        id: document.id,
-        ...(document.data() as Omit<Song, "id">),
-      }));
+    songs.forEach((song) => {
+      if (song.category.trim()) {
+        names.add(song.category.trim());
+      }
+    });
 
-      loadedSongs.sort((a, b) => {
-        const aTime = getTimestamp(a.createdAt);
-        const bTime = getTimestamp(b.createdAt);
+    return Array.from(names).sort((a, b) =>
+      a.localeCompare(b, "am")
+    );
+  }, [categories, songs]);
 
-        return bTime - aTime;
-      });
-
-      setSongs(loadedSongs);
-
-      setSelectedIds((current) =>
-        current.filter((id) =>
-          loadedSongs.some((song) => song.id === id)
-        )
-      );
-    } catch (err) {
-      console.error("SONGS LOAD FAILED:", err);
-
-      setError(
-        "Unable to load songs. Please check your Firebase connection and Firestore permissions."
-      );
-    } finally {
-      setLoading(false);
-    }
-  }
-
-  function getTimestamp(value: unknown): number {
-    if (!value) return 0;
-
-    if (value instanceof Timestamp) {
-      return value.toMillis();
-    }
-
-    if (
-      typeof value === "object" &&
-      value !== null &&
-      "toMillis" in value &&
-      typeof (value as { toMillis?: unknown }).toMillis === "function"
-    ) {
-      return (value as { toMillis: () => number }).toMillis();
-    }
-
-    if (value instanceof Date) {
-      return value.getTime();
-    }
-
-    if (typeof value === "string") {
-      const parsed = new Date(value).getTime();
-      return Number.isNaN(parsed) ? 0 : parsed;
-    }
-
-    return 0;
-  }
-
-  function formatDate(value: unknown): string {
-    const timestamp = getTimestamp(value);
-
-    if (!timestamp) {
-      return "Not available";
-    }
-
-    return new Date(timestamp).toLocaleString();
-  }
-
-  const categories = Array.from(
-    new Set(
-      songs
-        .map((song) => song.category?.trim())
-        .filter(
-          (value): value is string => Boolean(value)
-        )
-    )
-  ).sort();
-
-  const filteredSongs = songs.filter((song) => {
+  const filteredSongs = useMemo(() => {
     const query = search.trim().toLowerCase();
 
-    const matchesSearch =
-      !query ||
-      song.title?.toLowerCase().includes(query) ||
-      song.lyrics?.toLowerCase().includes(query) ||
-      song.category?.toLowerCase().includes(query);
+    return songs.filter((song) => {
+      const matchesSearch =
+        !query ||
+        song.title.toLowerCase().includes(query) ||
+        song.lyrics.toLowerCase().includes(query) ||
+        song.category.toLowerCase().includes(query);
 
-    const matchesCategory =
-      category === "all" ||
-      song.category?.trim() === category;
+      const matchesCategory =
+        categoryFilter === "all" ||
+        song.category === categoryFilter;
 
-    return matchesSearch && matchesCategory;
-  });
+      return matchesSearch && matchesCategory;
+    });
+  }, [songs, search, categoryFilter]);
 
-  const selectedVisibleCount = filteredSongs.filter((song) =>
-    selectedIds.includes(song.id)
-  ).length;
+  const audioCount = useMemo(
+    () => songs.filter((song) => song.youtubeUrl.trim()).length,
+    [songs]
+  );
+
+  const selectedCount = selectedIds.length;
 
   const allVisibleSelected =
     filteredSongs.length > 0 &&
-    filteredSongs.every((song) =>
-      selectedIds.includes(song.id)
+    filteredSongs.every((song) => selectedIds.includes(song.id));
+
+  function openView(song: Song) {
+    setSelectedSong(song);
+    setModal("view");
+  }
+
+  function openEdit(song: Song) {
+    setSelectedSong(song);
+    setTitle(song.title);
+    setLyrics(song.lyrics);
+    setCategory(song.category);
+    setYoutubeUrl(song.youtubeUrl);
+    setFormError("");
+    setModal("edit");
+  }
+
+  function openAdd() {
+    setSelectedSong(null);
+    setTitle("");
+    setLyrics("");
+    setCategory(categoryOptions[0] || "");
+    setYoutubeUrl("");
+    setFormError("");
+    setModal("add");
+  }
+
+  function closeModal() {
+    if (saving) return;
+
+    setModal(null);
+    setSelectedSong(null);
+    setFormError("");
+  }
+
+  function toggleSelection(id: string) {
+    setSelectedIds((current) =>
+      current.includes(id)
+        ? current.filter((item) => item !== id)
+        : [...current, id]
     );
-
-  function toggleSongSelection(songId: string) {
-    setSelectedIds((current) => {
-      if (current.includes(songId)) {
-        return current.filter((id) => id !== songId);
-      }
-
-      return [...current, songId];
-    });
   }
 
   function toggleSelectAllVisible() {
@@ -236,920 +281,1094 @@ export default function SongsManagementPage() {
       setSelectedIds((current) =>
         current.filter((id) => !visibleIds.includes(id))
       );
-      return;
+    } else {
+      setSelectedIds((current) => {
+        const next = new Set(current);
+
+        visibleIds.forEach((id) => next.add(id));
+
+        return Array.from(next);
+      });
     }
-
-    setSelectedIds((current) => {
-      const combined = new Set([
-        ...current,
-        ...visibleIds,
-      ]);
-
-      return Array.from(combined);
-    });
   }
 
-  function clearSelection() {
-    setSelectedIds([]);
+  function validateSongForm() {
+    if (!title.trim()) {
+      setFormError("Song title is required.");
+      return false;
+    }
+
+    if (!lyrics.trim()) {
+      setFormError("Lyrics are required.");
+      return false;
+    }
+
+    if (lyrics.trim().length < 30) {
+      setFormError(
+        `Lyrics must contain at least 30 characters. Current: ${lyrics.trim().length}.`
+      );
+      return false;
+    }
+
+    if (!category.trim()) {
+      setFormError("Please select a category.");
+      return false;
+    }
+
+    return true;
   }
 
-  function openEdit(song: Song) {
-    setSelectedSong(null);
+  async function handleSave(event: FormEvent) {
+    event.preventDefault();
 
-    setEditingSong(song);
-    setEditTitle(song.title ?? "");
-    setEditLyrics(song.lyrics ?? "");
-    setEditCategory(song.category ?? "");
-    setEditYoutubeUrl(song.youtubeUrl ?? "");
-    setError("");
-  }
-
-  function closeEdit() {
-    if (saving) return;
-
-    setEditingSong(null);
-    setEditTitle("");
-    setEditLyrics("");
-    setEditCategory("");
-    setEditYoutubeUrl("");
-  }
-
-  async function handleSaveEdit() {
-    if (!editingSong) return;
-
-    const title = editTitle.trim();
-    const lyrics = editLyrics.trim();
-    const newCategory = editCategory.trim();
-    const youtubeUrl = editYoutubeUrl.trim();
-
-    if (!title) {
-      setError("Song title is required.");
-      return;
-    }
-
-    if (!lyrics) {
-      setError("Lyrics are required.");
-      return;
-    }
-
-    if (lyrics.length < 30) {
-      setError("Lyrics must contain at least 30 characters.");
-      return;
-    }
-
-    if (!newCategory) {
-      setError("Please select a category.");
-      return;
-    }
+    if (!validateSongForm()) return;
 
     setSaving(true);
-    setError("");
+    setFormError("");
 
     try {
-      const songRef = doc(
-        db,
-        "shared_songs",
-        editingSong.id
+      const user = auth.currentUser;
+
+      if (!user) {
+        setFormError("Your session has expired. Please sign in again.");
+        return;
+      }
+
+      const normalizedTitle = title.trim().toLowerCase();
+
+      const duplicate = songs.find(
+        (song) =>
+          song.title.trim().toLowerCase() === normalizedTitle &&
+          song.id !== selectedSong?.id
       );
 
-      await updateDoc(songRef, {
-        title,
-        lyrics,
-        category: newCategory,
-        youtubeUrl,
-      });
+      if (duplicate) {
+        setFormError(
+          `A song with the title "${duplicate.title}" already exists.`
+        );
+        return;
+      }
 
-      setSongs((currentSongs) =>
-        currentSongs.map((song) =>
-          song.id === editingSong.id
-            ? {
-                ...song,
-                title,
-                lyrics,
-                category: newCategory,
-                youtubeUrl,
-              }
-            : song
-        )
-      );
+      if (modal === "add") {
+        const docRef = await addDoc(collection(db, "shared_songs"), {
+          title: title.trim(),
+          lyrics: lyrics.trim(),
+          category: category.trim(),
+          youtubeUrl: youtubeUrl.trim(),
+          isFavorite: false,
+          isUserCreated: true,
+          uploaderId: user.uid,
+          createdAt: serverTimestamp(),
+          timestamp: serverTimestamp(),
+        });
 
-      setSelectedSong(null);
-      closeEdit();
+        const newSong: Song = {
+          id: docRef.id,
+          title: title.trim(),
+          lyrics: lyrics.trim(),
+          category: category.trim(),
+          youtubeUrl: youtubeUrl.trim(),
+          isFavorite: false,
+          isUserCreated: true,
+          uploaderId: user.uid,
+          createdAt: null,
+          timestamp: null,
+        };
+
+        setSongs((current) => [newSong, ...current]);
+      }
+
+      if (modal === "edit" && selectedSong) {
+        await updateDoc(doc(db, "shared_songs", selectedSong.id), {
+          title: title.trim(),
+          lyrics: lyrics.trim(),
+          category: category.trim(),
+          youtubeUrl: youtubeUrl.trim(),
+        });
+
+        setSongs((current) =>
+          current.map((song) =>
+            song.id === selectedSong.id
+              ? {
+                  ...song,
+                  title: title.trim(),
+                  lyrics: lyrics.trim(),
+                  category: category.trim(),
+                  youtubeUrl: youtubeUrl.trim(),
+                }
+              : song
+          )
+        );
+      }
+
+      closeModal();
     } catch (err) {
-      console.error("SONGS UPDATE FAILED:", err);
-
-      setError(
-        "Unable to update this song. Please check your Firebase permissions."
-      );
+      console.error("Save song error:", err);
+      setFormError("Unable to save the song. Please try again.");
     } finally {
       setSaving(false);
     }
   }
 
-  async function handleDelete(song: Song) {
+  async function deleteSong(song: Song) {
     const confirmed = window.confirm(
-      `Are you sure you want to permanently delete "${song.title || "this song"}"?\n\nThis will remove the song from the shared_songs collection and it cannot be undone.`
+      `Delete "${song.title}"?\n\nThis action cannot be undone.`
     );
 
-    if (!confirmed) {
-      return;
-    }
+    if (!confirmed) return;
 
-    setDeletingId(song.id);
-    setError("");
+    setDeleting(true);
 
     try {
-      const songRef = doc(
-        db,
-        "shared_songs",
-        song.id
-      );
+      await deleteDoc(doc(db, "shared_songs", song.id));
 
-      await deleteDoc(songRef);
-
-      setSongs((currentSongs) =>
-        currentSongs.filter(
-          (item) => item.id !== song.id
-        )
+      setSongs((current) =>
+        current.filter((item) => item.id !== song.id)
       );
 
       setSelectedIds((current) =>
         current.filter((id) => id !== song.id)
       );
-
-      if (selectedSong?.id === song.id) {
-        setSelectedSong(null);
-      }
     } catch (err) {
-      console.error("SONGS DELETE FAILED:", err);
-
-      setError(
-        "Unable to delete this song. Please check your Firebase permissions."
-      );
+      console.error("Delete song error:", err);
+      setError("Unable to delete the song.");
     } finally {
-      setDeletingId(null);
+      setDeleting(false);
     }
   }
 
-  async function handleBulkDelete() {
-    if (selectedIds.length === 0) {
-      return;
-    }
+  async function deleteSelected() {
+    if (selectedIds.length === 0) return;
 
     const selectedSongs = songs.filter((song) =>
       selectedIds.includes(song.id)
     );
 
-    const previewNames = selectedSongs
+    const preview = selectedSongs
       .slice(0, 5)
-      .map((song) => `• ${song.title || "Untitled"}`)
+      .map((song) => `• ${song.title}`)
       .join("\n");
 
-    const extraCount =
+    const extra =
       selectedSongs.length > 5
-        ? `\n• ...and ${selectedSongs.length - 5} more`
+        ? `\n• And ${selectedSongs.length - 5} more...`
         : "";
 
     const confirmed = window.confirm(
-      `You are about to permanently delete ${selectedSongs.length} song${selectedSongs.length === 1 ? "" : "s"}.\n\n${previewNames}${extraCount}\n\nThis action cannot be undone.`
+      `Delete ${selectedSongs.length} selected song(s)?\n\n${preview}${extra}\n\nThis action cannot be undone.`
     );
 
-    if (!confirmed) {
-      return;
-    }
+    if (!confirmed) return;
 
-    setBulkDeleting(true);
+    setDeleting(true);
     setError("");
 
     try {
-      console.log(
-        "SONGS: Bulk deleting:",
-        selectedSongs.length
-      );
-
       await Promise.all(
-        selectedSongs.map((song) =>
-          deleteDoc(
-            doc(db, "shared_songs", song.id)
-          )
+        selectedIds.map((id) =>
+          deleteDoc(doc(db, "shared_songs", id))
         )
       );
 
-      const deletedIds = new Set(selectedIds);
-
-      setSongs((currentSongs) =>
-        currentSongs.filter(
-          (song) => !deletedIds.has(song.id)
-        )
+      setSongs((current) =>
+        current.filter((song) => !selectedIds.includes(song.id))
       );
 
       setSelectedIds([]);
-
-      if (
-        selectedSong &&
-        deletedIds.has(selectedSong.id)
-      ) {
-        setSelectedSong(null);
-      }
-
-      console.log("SONGS: Bulk delete successful.");
     } catch (err) {
-      console.error("SONGS BULK DELETE FAILED:", err);
-
-      setError(
-        "Some songs could not be deleted. Please refresh the page and check which songs remain."
-      );
-
-      await loadSongs();
+      console.error("Bulk delete error:", err);
+      setError("Some songs could not be deleted.");
     } finally {
-      setBulkDeleting(false);
+      setDeleting(false);
     }
   }
 
-  async function handleRefresh() {
-    await loadSongs();
+  function formatDate(song: Song) {
+    const date = song.createdAt || song.timestamp;
+
+    if (!date || !(date instanceof Timestamp)) {
+      return "Recently";
+    }
+
+    return date.toDate().toLocaleDateString("en-US", {
+      month: "short",
+      day: "numeric",
+      year: "numeric",
+    });
   }
 
-  async function handleLogout() {
-    await signOut(auth);
-    router.replace("/");
-  }
-
-  if (checking) {
+  if (loading) {
     return (
-      <main className="flex min-h-screen items-center justify-center bg-slate-100">
-        <div className="text-sm text-slate-500">
-          Verifying administrator access...
+      <div className="mx-auto max-w-7xl space-y-6">
+        <div className="animate-pulse">
+          <div className="h-8 w-48 rounded-lg bg-slate-200" />
+          <div className="mt-3 h-4 w-72 rounded bg-slate-200" />
         </div>
-      </main>
-    );
-  }
 
-  if (!authorized) {
-    return (
-      <main className="flex min-h-screen items-center justify-center bg-slate-100 px-4">
-        <div className="w-full max-w-md rounded-2xl bg-white p-8 text-center shadow-xl">
-          <h1 className="text-xl font-bold text-red-600">
-            Access Denied
-          </h1>
-
-          <p className="mt-2 text-sm text-slate-500">
-            {error || "You are not authorized."}
-          </p>
+        <div className="grid gap-4 sm:grid-cols-3">
+          {[1, 2, 3].map((item) => (
+            <div
+              key={item}
+              className="h-28 rounded-2xl border border-slate-200 bg-white"
+            />
+          ))}
         </div>
-      </main>
+
+        <div className="h-[500px] animate-pulse rounded-2xl border border-slate-200 bg-white" />
+      </div>
     );
   }
 
   return (
-    <main className="min-h-screen bg-slate-100">
-      <header className="border-b bg-white">
-        <div className="mx-auto flex max-w-7xl items-center justify-between px-6 py-4">
-          <div>
-            <button
-              onClick={() => router.push("/dashboard")}
-              className="mb-1 text-sm font-medium text-emerald-600 hover:text-emerald-700"
-            >
-              ← Back to Dashboard
-            </button>
-
-            <h1 className="text-xl font-bold text-slate-900">
-              Songs Management
-            </h1>
-
-            <p className="text-sm text-slate-500">
-              Manage songs stored in Netsir Firestore
-            </p>
+    <div className="mx-auto max-w-7xl space-y-6">
+      {/* Heading */}
+      <section className="flex flex-col justify-between gap-5 sm:flex-row sm:items-end">
+        <div>
+          <div className="mb-2 flex items-center gap-2 text-sm font-medium text-emerald-600">
+            <Music2 size={17} />
+            Content Management
           </div>
 
-          <div className="flex items-center gap-3">
-            <button
-              onClick={handleRefresh}
-              disabled={loading || bulkDeleting}
-              className="rounded-lg border border-slate-300 bg-white px-4 py-2 text-sm font-medium text-slate-700 transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50"
-            >
-              {loading ? "Refreshing..." : "Refresh"}
-            </button>
+          <h1 className="text-2xl font-bold tracking-tight text-slate-900 sm:text-3xl">
+            Songs
+          </h1>
 
-            <button
-              onClick={handleLogout}
-              className="rounded-lg bg-red-500 px-4 py-2 text-sm font-medium text-white transition hover:bg-red-600"
-            >
-              Sign Out
-            </button>
-          </div>
-        </div>
-      </header>
-
-      <div className="mx-auto max-w-7xl px-6 py-8">
-        <div className="mb-6">
-          <h2 className="text-2xl font-bold text-slate-900">
-            Shared Songs
-          </h2>
-
-          <p className="mt-1 text-sm text-slate-500">
-            Browse and manage songs currently stored in the{" "}
-            <span className="font-medium text-slate-700">
-              shared_songs
-            </span>{" "}
-            collection.
+          <p className="mt-2 text-sm text-slate-500">
+            Manage your Netsir songs, lyrics, categories, and audio.
           </p>
         </div>
 
-        {error && (
-          <div className="mb-6 rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-600">
-            {error}
-          </div>
-        )}
+        <div className="flex items-center gap-3">
+          <button
+            type="button"
+            onClick={() => loadData(true)}
+            disabled={refreshing}
+            className="inline-flex items-center gap-2 rounded-xl border border-slate-200 bg-white px-4 py-2.5 text-sm font-medium text-slate-700 shadow-sm transition hover:bg-slate-50 disabled:opacity-60"
+          >
+            <RefreshCw
+              size={16}
+              className={refreshing ? "animate-spin" : ""}
+            />
+            Refresh
+          </button>
 
-        <div className="mb-6 grid gap-4 sm:grid-cols-3">
-          <div className="rounded-2xl bg-white p-5 shadow-sm">
-            <p className="text-sm font-medium text-slate-500">
-              Total Songs
-            </p>
+          <button
+            type="button"
+            onClick={openAdd}
+            className="inline-flex items-center gap-2 rounded-xl bg-emerald-600 px-4 py-2.5 text-sm font-semibold text-white shadow-sm shadow-emerald-200 transition hover:bg-emerald-700"
+          >
+            <Plus size={17} />
+            Add Song
+          </button>
+        </div>
+      </section>
 
-            <p className="mt-2 text-3xl font-bold text-slate-900">
-              {loading ? "..." : songs.length}
-            </p>
-          </div>
+      {/* Error */}
+      {error && (
+        <div className="flex items-center gap-3 rounded-2xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
+          <AlertCircle size={18} />
+          <span className="flex-1">{error}</span>
 
-          <div className="rounded-2xl bg-white p-5 shadow-sm">
-            <p className="text-sm font-medium text-slate-500">
-              Categories
-            </p>
+          <button
+            type="button"
+            onClick={() => setError("")}
+            className="rounded-lg p-1 hover:bg-red-100"
+          >
+            <X size={16} />
+          </button>
+        </div>
+      )}
 
-            <p className="mt-2 text-3xl font-bold text-slate-900">
-              {loading ? "..." : categories.length}
-            </p>
-          </div>
+      {/* Statistics */}
+      <section className="grid gap-4 sm:grid-cols-3">
+        <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
+          <div className="flex items-center gap-4">
+            <div className="flex h-11 w-11 items-center justify-center rounded-xl bg-emerald-50 text-emerald-600">
+              <ListMusic size={21} />
+            </div>
 
-          <div className="rounded-2xl bg-white p-5 shadow-sm">
-            <p className="text-sm font-medium text-slate-500">
-              Showing
-            </p>
+            <div>
+              <p className="text-xs font-medium text-slate-400">
+                Total Songs
+              </p>
 
-            <p className="mt-2 text-3xl font-bold text-emerald-600">
-              {loading ? "..." : filteredSongs.length}
-            </p>
+              <p className="mt-1 text-2xl font-bold text-slate-900">
+                {songs.length}
+              </p>
+            </div>
           </div>
         </div>
 
-        <div className="mb-6 rounded-2xl bg-white p-5 shadow-sm">
-          <div className="grid gap-4 md:grid-cols-[1fr_220px]">
+        <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
+          <div className="flex items-center gap-4">
+            <div className="flex h-11 w-11 items-center justify-center rounded-xl bg-blue-50 text-blue-600">
+              <FolderOpen size={21} />
+            </div>
+
             <div>
-              <label className="mb-2 block text-sm font-medium text-slate-700">
-                Search Songs
-              </label>
+              <p className="text-xs font-medium text-slate-400">
+                Categories
+              </p>
+
+              <p className="mt-1 text-2xl font-bold text-slate-900">
+                {categoryOptions.length}
+              </p>
+            </div>
+          </div>
+        </div>
+
+        <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
+          <div className="flex items-center gap-4">
+            <div className="flex h-11 w-11 items-center justify-center rounded-xl bg-violet-50 text-violet-600">
+              <ExternalLink size={21} />
+            </div>
+
+            <div>
+              <p className="text-xs font-medium text-slate-400">
+                With Audio
+              </p>
+
+              <p className="mt-1 text-2xl font-bold text-slate-900">
+                {audioCount}
+              </p>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      {/* Main card */}
+      <section className="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm">
+        {/* Toolbar */}
+        <div className="border-b border-slate-100 p-4 sm:p-5">
+          <div className="flex flex-col gap-3 lg:flex-row">
+            {/* Search */}
+            <div className="relative flex-1">
+              <Search
+                size={18}
+                className="absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-400"
+              />
 
               <input
                 type="text"
                 value={search}
-                onChange={(e) => setSearch(e.target.value)}
+                onChange={(event) => setSearch(event.target.value)}
                 placeholder="Search by title, lyrics, or category..."
-                className="w-full rounded-xl border border-slate-300 px-4 py-3 text-sm outline-none transition focus:border-emerald-500 focus:ring-2 focus:ring-emerald-100"
+                className="h-11 w-full rounded-xl border border-slate-200 bg-slate-50 pl-10 pr-4 text-sm text-slate-800 outline-none transition placeholder:text-slate-400 focus:border-emerald-400 focus:bg-white focus:ring-4 focus:ring-emerald-50"
               />
+
+              {search && (
+                <button
+                  type="button"
+                  onClick={() => setSearch("")}
+                  className="absolute right-3 top-1/2 -translate-y-1/2 rounded-md p-1 text-slate-400 hover:bg-slate-200 hover:text-slate-700"
+                >
+                  <X size={15} />
+                </button>
+              )}
             </div>
 
-            <div>
-              <label className="mb-2 block text-sm font-medium text-slate-700">
-                Category
-              </label>
+            {/* Category */}
+            <div className="relative lg:w-56">
+              <FolderOpen
+                size={16}
+                className="absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-400"
+              />
 
               <select
-                value={category}
-                onChange={(e) => setCategory(e.target.value)}
-                className="w-full rounded-xl border border-slate-300 bg-white px-4 py-3 text-sm outline-none transition focus:border-emerald-500 focus:ring-2 focus:ring-emerald-100"
+                value={categoryFilter}
+                onChange={(event) =>
+                  setCategoryFilter(event.target.value)
+                }
+                className="h-11 w-full appearance-none rounded-xl border border-slate-200 bg-slate-50 pl-10 pr-10 text-sm text-slate-700 outline-none focus:border-emerald-400 focus:bg-white focus:ring-4 focus:ring-emerald-50"
               >
                 <option value="all">All Categories</option>
 
-                {categories.map((item) => (
+                {categoryOptions.map((item) => (
                   <option key={item} value={item}>
                     {item}
                   </option>
                 ))}
               </select>
+
+              <ChevronDown
+                size={16}
+                className="pointer-events-none absolute right-3.5 top-1/2 -translate-y-1/2 text-slate-400"
+              />
             </div>
+          </div>
+
+          {/* Results summary */}
+          <div className="mt-4 flex flex-wrap items-center justify-between gap-3">
+            <p className="text-xs text-slate-400">
+              Showing{" "}
+              <span className="font-semibold text-slate-600">
+                {filteredSongs.length}
+              </span>{" "}
+              of{" "}
+              <span className="font-semibold text-slate-600">
+                {songs.length}
+              </span>{" "}
+              songs
+            </p>
+
+            {(search || categoryFilter !== "all") && (
+              <button
+                type="button"
+                onClick={() => {
+                  setSearch("");
+                  setCategoryFilter("all");
+                }}
+                className="text-xs font-medium text-emerald-600 hover:text-emerald-700"
+              >
+                Clear filters
+              </button>
+            )}
           </div>
         </div>
 
-        {selectedIds.length > 0 && (
-          <div className="mb-4 flex flex-col gap-3 rounded-2xl border border-red-200 bg-red-50 p-4 sm:flex-row sm:items-center sm:justify-between">
-            <div>
-              <p className="font-semibold text-red-700">
-                {selectedIds.length} song
-                {selectedIds.length === 1 ? "" : "s"} selected
-              </p>
-
-              <p className="mt-1 text-xs text-red-500">
-                Selected songs will be permanently deleted.
-              </p>
+        {/* Bulk toolbar */}
+        {selectedCount > 0 && (
+          <div className="flex flex-col gap-3 border-b border-red-100 bg-red-50 px-4 py-3 sm:flex-row sm:items-center sm:justify-between sm:px-5">
+            <div className="flex items-center gap-2 text-sm font-medium text-red-700">
+              <CheckCircle2 size={17} />
+              {selectedCount} song{selectedCount !== 1 ? "s" : ""} selected
             </div>
 
-            <div className="flex gap-2">
+            <div className="flex items-center gap-2">
               <button
-                onClick={clearSelection}
-                disabled={bulkDeleting}
-                className="rounded-lg border border-slate-300 bg-white px-4 py-2 text-sm font-medium text-slate-700 transition hover:bg-slate-50 disabled:opacity-50"
+                type="button"
+                onClick={() => setSelectedIds([])}
+                className="rounded-lg px-3 py-2 text-xs font-medium text-slate-600 hover:bg-white"
               >
                 Clear Selection
               </button>
 
               <button
-                onClick={handleBulkDelete}
-                disabled={bulkDeleting}
-                className="rounded-lg bg-red-600 px-4 py-2 text-sm font-medium text-white transition hover:bg-red-700 disabled:cursor-not-allowed disabled:opacity-50"
+                type="button"
+                onClick={deleteSelected}
+                disabled={deleting}
+                className="inline-flex items-center gap-2 rounded-lg bg-red-600 px-3 py-2 text-xs font-semibold text-white hover:bg-red-700 disabled:opacity-60"
               >
-                {bulkDeleting
-                  ? "Deleting..."
-                  : `Delete ${selectedIds.length}`}
+                <Trash2 size={14} />
+                {deleting ? "Deleting..." : `Delete ${selectedCount}`}
               </button>
             </div>
           </div>
         )}
 
-        <div className="overflow-hidden rounded-2xl bg-white shadow-sm">
-          <div className="border-b px-6 py-4">
-            <h3 className="font-bold text-slate-900">
-              Songs List
-            </h3>
-
-            <p className="mt-1 text-xs text-slate-400">
-              {filteredSongs.length} song
-              {filteredSongs.length === 1 ? "" : "s"} displayed
-              {selectedIds.length > 0 &&
-                ` • ${selectedIds.length} selected`}
-            </p>
-          </div>
-
-          {loading ? (
-            <div className="px-6 py-16 text-center">
-              <p className="text-sm text-slate-500">
-                Loading songs...
-              </p>
-            </div>
-          ) : filteredSongs.length === 0 ? (
-            <div className="px-6 py-16 text-center">
-              <div className="text-4xl">🎵</div>
-
-              <h4 className="mt-4 font-semibold text-slate-900">
-                No songs found
-              </h4>
-
-              <p className="mt-1 text-sm text-slate-500">
-                Try changing your search or category filter.
-              </p>
-            </div>
-          ) : (
-            <div className="overflow-x-auto">
-              <table className="w-full min-w-[1200px]">
-                <thead className="bg-slate-50">
-                  <tr>
-                    <th className="w-14 px-6 py-4">
-                      <input
-                        type="checkbox"
-                        checked={allVisibleSelected}
-                        onChange={toggleSelectAllVisible}
-                        className="h-4 w-4 cursor-pointer rounded border-slate-300 text-emerald-600 focus:ring-emerald-500"
-                        title={
-                          allVisibleSelected
-                            ? "Deselect all visible songs"
-                            : "Select all visible songs"
-                        }
+        {/* Desktop table */}
+        <div className="hidden overflow-x-auto md:block">
+          <table className="w-full">
+            <thead>
+              <tr className="border-b border-slate-100 bg-slate-50/70">
+                <th className="w-12 px-5 py-3 text-left">
+                  <button
+                    type="button"
+                    onClick={toggleSelectAllVisible}
+                    className="flex items-center justify-center text-slate-400 hover:text-emerald-600"
+                    title="Select all visible"
+                  >
+                    {allVisibleSelected ? (
+                      <CheckCircle2
+                        size={18}
+                        className="text-emerald-600"
                       />
-                    </th>
+                    ) : (
+                      <Circle size={18} />
+                    )}
+                  </button>
+                </th>
 
-                    <th className="px-6 py-4 text-left text-xs font-semibold uppercase tracking-wide text-slate-500">
-                      #
-                    </th>
+                <th className="px-3 py-3 text-left text-[11px] font-semibold uppercase tracking-wider text-slate-400">
+                  Song
+                </th>
 
-                    <th className="px-6 py-4 text-left text-xs font-semibold uppercase tracking-wide text-slate-500">
-                      Song
-                    </th>
+                <th className="px-3 py-3 text-left text-[11px] font-semibold uppercase tracking-wider text-slate-400">
+                  Category
+                </th>
 
-                    <th className="px-6 py-4 text-left text-xs font-semibold uppercase tracking-wide text-slate-500">
-                      Category
-                    </th>
+                <th className="px-3 py-3 text-left text-[11px] font-semibold uppercase tracking-wider text-slate-400">
+                  Audio
+                </th>
 
-                    <th className="px-6 py-4 text-left text-xs font-semibold uppercase tracking-wide text-slate-500">
-                      Lyrics
-                    </th>
+                <th className="px-3 py-3 text-left text-[11px] font-semibold uppercase tracking-wider text-slate-400">
+                  Added
+                </th>
 
-                    <th className="px-6 py-4 text-left text-xs font-semibold uppercase tracking-wide text-slate-500">
-                      Audio
-                    </th>
+                <th className="w-16 px-5 py-3" />
+              </tr>
+            </thead>
 
-                    <th className="px-6 py-4 text-right text-xs font-semibold uppercase tracking-wide text-slate-500">
-                      Actions
-                    </th>
-                  </tr>
-                </thead>
+            <tbody className="divide-y divide-slate-100">
+              {filteredSongs.map((song) => {
+                const selected = selectedIds.includes(song.id);
 
-                <tbody className="divide-y divide-slate-100">
-                  {filteredSongs.map((song, index) => {
-                    const isSelected = selectedIds.includes(song.id);
-
-                    return (
-                      <tr
-                        key={song.id}
-                        className={`transition ${
-                          isSelected
-                            ? "bg-red-50"
-                            : "hover:bg-slate-50"
-                        }`}
+                return (
+                  <tr
+                    key={song.id}
+                    className={`group transition hover:bg-slate-50 ${
+                      selected ? "bg-red-50/50" : ""
+                    }`}
+                  >
+                    <td className="px-5 py-4">
+                      <button
+                        type="button"
+                        onClick={() => toggleSelection(song.id)}
+                        className="flex items-center justify-center text-slate-400 hover:text-emerald-600"
                       >
-                        <td className="px-6 py-4">
-                          <input
-                            type="checkbox"
-                            checked={isSelected}
-                            onChange={() =>
-                              toggleSongSelection(song.id)
-                            }
-                            className="h-4 w-4 cursor-pointer rounded border-slate-300 text-emerald-600 focus:ring-emerald-500"
+                        {selected ? (
+                          <CheckCircle2
+                            size={18}
+                            className="text-emerald-600"
                           />
-                        </td>
+                        ) : (
+                          <Circle size={18} />
+                        )}
+                      </button>
+                    </td>
 
-                        <td className="px-6 py-4 text-sm text-slate-400">
-                          {index + 1}
-                        </td>
+                    <td className="max-w-[360px] px-3 py-4">
+                      <div className="flex items-center gap-3">
+                        <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-emerald-50 text-sm font-bold text-emerald-700">
+                          {song.title.trim().charAt(0) || "♪"}
+                        </div>
 
-                        <td className="max-w-[220px] px-6 py-4">
-                          <div className="font-semibold text-slate-900">
+                        <div className="min-w-0">
+                          <p className="truncate text-sm font-semibold text-slate-800">
                             {song.title || "Untitled"}
-                          </div>
-                        </td>
+                          </p>
 
-                        <td className="px-6 py-4">
-                          {song.category ? (
-                            <span className="inline-flex rounded-full bg-emerald-50 px-3 py-1 text-xs font-medium text-emerald-700">
-                              {song.category}
-                            </span>
-                          ) : (
-                            <span className="text-sm text-slate-400">
-                              —
-                            </span>
-                          )}
-                        </td>
-
-                        <td className="max-w-[300px] px-6 py-4">
-                          <p className="line-clamp-2 text-sm leading-6 text-slate-500">
+                          <p className="mt-0.5 max-w-[300px] truncate text-xs text-slate-400">
                             {song.lyrics || "No lyrics"}
                           </p>
-                        </td>
+                        </div>
+                      </div>
+                    </td>
 
-                        <td className="px-6 py-4">
-                          {song.youtubeUrl ? (
-                            <span className="inline-flex rounded-full bg-red-50 px-3 py-1 text-xs font-medium text-red-600">
-                              Available
-                            </span>
-                          ) : (
-                            <span className="text-sm text-slate-400">
-                              —
-                            </span>
-                          )}
-                        </td>
+                    <td className="px-3 py-4">
+                      <span className="inline-flex max-w-[150px] truncate rounded-lg bg-slate-100 px-2.5 py-1 text-xs font-medium text-slate-600">
+                        {song.category || "Uncategorized"}
+                      </span>
+                    </td>
 
-                        <td className="px-6 py-4">
-                          <div className="flex justify-end gap-2">
+                    <td className="px-3 py-4">
+                      {song.youtubeUrl ? (
+                        <span className="inline-flex items-center gap-1.5 rounded-lg bg-emerald-50 px-2.5 py-1 text-xs font-medium text-emerald-700">
+                          <CheckCircle2 size={13} />
+                          Available
+                        </span>
+                      ) : (
+                        <span className="text-xs text-slate-400">
+                          No audio
+                        </span>
+                      )}
+                    </td>
+
+                    <td className="px-3 py-4">
+                      <span className="inline-flex items-center gap-1.5 text-xs text-slate-400">
+                        <Clock3 size={13} />
+                        {formatDate(song)}
+                      </span>
+                    </td>
+
+                    <td className="px-5 py-4">
+                      <div className="relative flex justify-end">
+                        <details className="group/menu relative">
+                          <summary className="flex h-9 w-9 cursor-pointer list-none items-center justify-center rounded-lg text-slate-400 hover:bg-slate-100 hover:text-slate-700">
+                            <MoreVertical size={18} />
+                          </summary>
+
+                          <div className="absolute right-0 top-10 z-20 w-44 overflow-hidden rounded-xl border border-slate-200 bg-white p-1.5 shadow-xl">
                             <button
-                              onClick={() =>
-                                setSelectedSong(song)
-                              }
-                              className="rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm font-medium text-slate-700 transition hover:bg-slate-50"
+                              type="button"
+                              onClick={() => openView(song)}
+                              className="flex w-full items-center gap-2.5 rounded-lg px-3 py-2.5 text-left text-xs font-medium text-slate-600 hover:bg-slate-50"
                             >
-                              View
+                              <Eye size={15} />
+                              View Song
                             </button>
 
                             <button
+                              type="button"
                               onClick={() => openEdit(song)}
-                              className="rounded-lg bg-blue-600 px-3 py-2 text-sm font-medium text-white transition hover:bg-blue-700"
+                              className="flex w-full items-center gap-2.5 rounded-lg px-3 py-2.5 text-left text-xs font-medium text-slate-600 hover:bg-slate-50"
                             >
-                              Edit
+                              <Pencil size={15} />
+                              Edit Song
                             </button>
 
+                            {song.youtubeUrl && (
+                              <a
+                                href={song.youtubeUrl}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                className="flex w-full items-center gap-2.5 rounded-lg px-3 py-2.5 text-left text-xs font-medium text-slate-600 hover:bg-slate-50"
+                              >
+                                <ExternalLink size={15} />
+                                Open Audio
+                              </a>
+                            )}
+
+                            <div className="my-1 border-t border-slate-100" />
+
                             <button
-                              onClick={() =>
-                                handleDelete(song)
-                              }
-                              disabled={
-                                deletingId === song.id ||
-                                bulkDeleting
-                              }
-                              className="rounded-lg bg-red-500 px-3 py-2 text-sm font-medium text-white transition hover:bg-red-600 disabled:cursor-not-allowed disabled:opacity-50"
+                              type="button"
+                              onClick={() => deleteSong(song)}
+                              disabled={deleting}
+                              className="flex w-full items-center gap-2.5 rounded-lg px-3 py-2.5 text-left text-xs font-medium text-red-600 hover:bg-red-50"
                             >
-                              {deletingId === song.id
-                                ? "Deleting..."
-                                : "Delete"}
+                              <Trash2 size={15} />
+                              Delete
                             </button>
                           </div>
-                        </td>
-                      </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
-            </div>
-          )}
+                        </details>
+                      </div>
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
         </div>
 
-        {selectedIds.length > 0 && (
-          <div className="mt-4 flex items-center justify-between text-xs text-slate-400">
-            <span>
-              {selectedVisibleCount} of {filteredSongs.length}{" "}
-              visible songs selected
-            </span>
+        {/* Mobile cards */}
+        <div className="divide-y divide-slate-100 md:hidden">
+          {filteredSongs.map((song) => {
+            const selected = selectedIds.includes(song.id);
 
-            {selectedIds.length !== selectedVisibleCount && (
-              <span>
-                {selectedIds.length - selectedVisibleCount} selected
-                outside the current filter
-              </span>
+            return (
+              <div
+                key={song.id}
+                className={`p-4 ${
+                  selected ? "bg-red-50/50" : ""
+                }`}
+              >
+                <div className="flex items-start gap-3">
+                  <button
+                    type="button"
+                    onClick={() => toggleSelection(song.id)}
+                    className="mt-1 shrink-0 text-slate-400"
+                  >
+                    {selected ? (
+                      <CheckCircle2
+                        size={18}
+                        className="text-emerald-600"
+                      />
+                    ) : (
+                      <Circle size={18} />
+                    )}
+                  </button>
+
+                  <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-emerald-50 text-sm font-bold text-emerald-700">
+                    {song.title.trim().charAt(0) || "♪"}
+                  </div>
+
+                  <div className="min-w-0 flex-1">
+                    <div className="flex items-start justify-between gap-2">
+                      <div className="min-w-0">
+                        <p className="truncate text-sm font-semibold text-slate-800">
+                          {song.title || "Untitled"}
+                        </p>
+
+                        <p className="mt-1 text-xs text-slate-400">
+                          {song.category || "Uncategorized"}
+                        </p>
+                      </div>
+
+                      <button
+                        type="button"
+                        onClick={() => openView(song)}
+                        className="shrink-0 rounded-lg p-2 text-slate-400 hover:bg-slate-100 hover:text-slate-700"
+                      >
+                        <Eye size={17} />
+                      </button>
+                    </div>
+
+                    <p className="mt-3 line-clamp-2 text-xs leading-5 text-slate-500">
+                      {song.lyrics || "No lyrics"}
+                    </p>
+
+                    <div className="mt-3 flex flex-wrap items-center gap-2">
+                      <span className="inline-flex items-center gap-1 rounded-md bg-slate-100 px-2 py-1 text-[10px] font-medium text-slate-500">
+                        <Clock3 size={11} />
+                        {formatDate(song)}
+                      </span>
+
+                      {song.youtubeUrl ? (
+                        <span className="inline-flex items-center gap-1 rounded-md bg-emerald-50 px-2 py-1 text-[10px] font-medium text-emerald-700">
+                          <CheckCircle2 size={11} />
+                          Audio
+                        </span>
+                      ) : (
+                        <span className="rounded-md bg-slate-100 px-2 py-1 text-[10px] font-medium text-slate-400">
+                          No audio
+                        </span>
+                      )}
+
+                      <button
+                        type="button"
+                        onClick={() => openEdit(song)}
+                        className="ml-auto inline-flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-xs font-medium text-slate-600 hover:bg-slate-100"
+                      >
+                        <Pencil size={13} />
+                        Edit
+                      </button>
+
+                      <button
+                        type="button"
+                        onClick={() => deleteSong(song)}
+                        className="inline-flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-xs font-medium text-red-600 hover:bg-red-50"
+                      >
+                        <Trash2 size={13} />
+                        Delete
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+
+        {/* Empty state */}
+        {filteredSongs.length === 0 && (
+          <div className="flex min-h-80 flex-col items-center justify-center px-6 text-center">
+            <div className="mb-4 flex h-14 w-14 items-center justify-center rounded-2xl bg-slate-100 text-slate-400">
+              <Music2 size={25} />
+            </div>
+
+            <h3 className="font-semibold text-slate-800">
+              {songs.length === 0
+                ? "No songs yet"
+                : "No matching songs"}
+            </h3>
+
+            <p className="mt-1 max-w-sm text-sm text-slate-400">
+              {songs.length === 0
+                ? "Add your first song to start building the Netsir library."
+                : "Try changing your search or category filter."}
+            </p>
+
+            {songs.length === 0 ? (
+              <button
+                type="button"
+                onClick={openAdd}
+                className="mt-5 inline-flex items-center gap-2 rounded-xl bg-emerald-600 px-4 py-2.5 text-sm font-semibold text-white hover:bg-emerald-700"
+              >
+                <Plus size={16} />
+                Add First Song
+              </button>
+            ) : (
+              <button
+                type="button"
+                onClick={() => {
+                  setSearch("");
+                  setCategoryFilter("all");
+                }}
+                className="mt-5 text-sm font-medium text-emerald-600 hover:text-emerald-700"
+              >
+                Clear filters
+              </button>
             )}
           </div>
         )}
-      </div>
+      </section>
 
-      {/* View Details Modal */}
-      {selectedSong && (
-        <div
-          className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 px-4 py-6"
-          onClick={() => setSelectedSong(null)}
-        >
-          <div
-            className="max-h-[90vh] w-full max-w-3xl overflow-y-auto rounded-2xl bg-white shadow-2xl"
-            onClick={(e) => e.stopPropagation()}
-          >
-            <div className="flex items-start justify-between border-b px-6 py-5">
-              <div className="pr-6">
-                <p className="text-xs font-semibold uppercase tracking-wide text-emerald-600">
+      {/* View modal */}
+      {modal === "view" && selectedSong && (
+        <div className="fixed inset-0 z-[100] flex items-center justify-center bg-slate-950/50 p-4 backdrop-blur-sm">
+          <div className="max-h-[90vh] w-full max-w-3xl overflow-hidden rounded-2xl bg-white shadow-2xl">
+            <div className="flex items-center justify-between border-b border-slate-100 px-5 py-4 sm:px-6">
+              <div>
+                <p className="text-xs font-medium text-emerald-600">
                   Song Details
                 </p>
 
-                <h3 className="mt-1 text-2xl font-bold text-slate-900">
-                  {selectedSong.title || "Untitled"}
-                </h3>
+                <h2 className="mt-1 text-lg font-bold text-slate-900">
+                  View Song
+                </h2>
               </div>
 
               <button
-                onClick={() => setSelectedSong(null)}
-                className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg text-xl text-slate-400 transition hover:bg-slate-100 hover:text-slate-700"
+                type="button"
+                onClick={closeModal}
+                className="rounded-xl p-2 text-slate-400 hover:bg-slate-100 hover:text-slate-700"
               >
-                ×
+                <X size={20} />
               </button>
             </div>
 
-            <div className="space-y-6 px-6 py-6">
-              <div>
-                <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-slate-400">
-                  Category
-                </p>
+            <div className="max-h-[calc(90vh-80px)] overflow-y-auto p-5 sm:p-6">
+              <div className="mb-6 flex items-start gap-4">
+                <div className="flex h-14 w-14 shrink-0 items-center justify-center rounded-2xl bg-emerald-50 text-lg font-bold text-emerald-700">
+                  {selectedSong.title.trim().charAt(0) || "♪"}
+                </div>
 
-                {selectedSong.category ? (
-                  <span className="inline-flex rounded-full bg-emerald-50 px-3 py-1.5 text-sm font-medium text-emerald-700">
-                    {selectedSong.category}
-                  </span>
-                ) : (
-                  <p className="text-sm text-slate-400">
-                    Not available
-                  </p>
-                )}
-              </div>
+                <div className="min-w-0">
+                  <h3 className="break-words text-xl font-bold text-slate-900">
+                    {selectedSong.title}
+                  </h3>
 
-              <div>
-                <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-slate-400">
-                  Lyrics
-                </p>
+                  <div className="mt-2 flex flex-wrap gap-2">
+                    <span className="rounded-lg bg-slate-100 px-2.5 py-1 text-xs font-medium text-slate-600">
+                      {selectedSong.category || "Uncategorized"}
+                    </span>
 
-                <div className="max-h-[350px] overflow-y-auto rounded-xl bg-slate-50 p-5">
-                  <p className="whitespace-pre-wrap text-sm leading-7 text-slate-700">
-                    {selectedSong.lyrics || "No lyrics available."}
-                  </p>
+                    {selectedSong.youtubeUrl && (
+                      <span className="inline-flex items-center gap-1 rounded-lg bg-emerald-50 px-2.5 py-1 text-xs font-medium text-emerald-700">
+                        <CheckCircle2 size={12} />
+                        Audio available
+                      </span>
+                    )}
+                  </div>
                 </div>
               </div>
 
-              <div>
-                <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-slate-400">
-                  YouTube / Audio URL
+              <div className="rounded-2xl border border-slate-200 bg-slate-50 p-5">
+                <p className="mb-3 text-xs font-semibold uppercase tracking-wider text-slate-400">
+                  Lyrics
                 </p>
 
-                {selectedSong.youtubeUrl ? (
-                  <a
-                    href={selectedSong.youtubeUrl}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="break-all text-sm font-medium text-emerald-600 hover:underline"
-                  >
-                    {selectedSong.youtubeUrl}
-                  </a>
-                ) : (
-                  <p className="text-sm text-slate-400">
-                    No audio URL
+                <div className="whitespace-pre-wrap text-sm leading-7 text-slate-700">
+                  {selectedSong.lyrics}
+                </div>
+              </div>
+
+              <div className="mt-5 grid gap-4 sm:grid-cols-2">
+                <div className="rounded-xl border border-slate-200 p-4">
+                  <p className="text-xs font-medium text-slate-400">
+                    Added
                   </p>
-                )}
-              </div>
 
-              <div>
-                <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-slate-400">
-                  Created
-                </p>
+                  <p className="mt-1 text-sm font-medium text-slate-700">
+                    {formatDate(selectedSong)}
+                  </p>
+                </div>
 
-                <p className="text-sm text-slate-700">
-                  {formatDate(selectedSong.createdAt)}
-                </p>
-              </div>
+                <div className="rounded-xl border border-slate-200 p-4">
+                  <p className="text-xs font-medium text-slate-400">
+                    Firestore ID
+                  </p>
 
-              <div>
-                <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-slate-400">
-                  Firestore Document ID
-                </p>
-
-                <div className="rounded-lg bg-slate-100 px-4 py-3">
-                  <p className="break-all font-mono text-xs text-slate-600">
+                  <p className="mt-1 break-all font-mono text-xs text-slate-600">
                     {selectedSong.id}
                   </p>
                 </div>
               </div>
-            </div>
 
-            <div className="flex justify-end gap-3 border-t bg-slate-50 px-6 py-4">
-              <button
-                onClick={() => handleDelete(selectedSong)}
-                disabled={
-                  deletingId === selectedSong.id ||
-                  bulkDeleting
-                }
-                className="rounded-lg bg-red-500 px-5 py-2.5 text-sm font-medium text-white transition hover:bg-red-600 disabled:cursor-not-allowed disabled:opacity-50"
-              >
-                {deletingId === selectedSong.id
-                  ? "Deleting..."
-                  : "Delete"}
-              </button>
-
-              <button
-                onClick={() => openEdit(selectedSong)}
-                className="rounded-lg bg-blue-600 px-5 py-2.5 text-sm font-medium text-white transition hover:bg-blue-700"
-              >
-                Edit
-              </button>
-
-              <button
-                onClick={() => setSelectedSong(null)}
-                className="rounded-lg bg-slate-800 px-5 py-2.5 text-sm font-medium text-white transition hover:bg-slate-900"
-              >
-                Close
-              </button>
+              {selectedSong.youtubeUrl && (
+                <a
+                  href={selectedSong.youtubeUrl}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="mt-5 inline-flex w-full items-center justify-center gap-2 rounded-xl bg-emerald-600 px-4 py-3 text-sm font-semibold text-white hover:bg-emerald-700"
+                >
+                  <ExternalLink size={16} />
+                  Open YouTube Audio
+                </a>
+              )}
             </div>
           </div>
         </div>
       )}
 
-      {/* Edit Modal */}
-      {editingSong && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 px-4 py-6">
-          <div className="max-h-[92vh] w-full max-w-3xl overflow-y-auto rounded-2xl bg-white shadow-2xl">
-            <div className="flex items-start justify-between border-b px-6 py-5">
+      {/* Add/Edit modal */}
+      {(modal === "add" || modal === "edit") && (
+        <div className="fixed inset-0 z-[100] flex items-center justify-center bg-slate-950/50 p-4 backdrop-blur-sm">
+          <div className="max-h-[92vh] w-full max-w-2xl overflow-hidden rounded-2xl bg-white shadow-2xl">
+            <div className="flex items-center justify-between border-b border-slate-100 px-5 py-4 sm:px-6">
               <div>
-                <p className="text-xs font-semibold uppercase tracking-wide text-blue-600">
-                  Edit Song
+                <p className="text-xs font-medium text-emerald-600">
+                  {modal === "add"
+                    ? "Create Content"
+                    : "Update Content"}
                 </p>
 
-                <h3 className="mt-1 text-2xl font-bold text-slate-900">
-                  {editingSong.title || "Untitled"}
-                </h3>
+                <h2 className="mt-1 text-lg font-bold text-slate-900">
+                  {modal === "add"
+                    ? "Add New Song"
+                    : "Edit Song"}
+                </h2>
               </div>
 
               <button
-                onClick={closeEdit}
+                type="button"
+                onClick={closeModal}
                 disabled={saving}
-                className="flex h-9 w-9 items-center justify-center rounded-lg text-xl text-slate-400 transition hover:bg-slate-100 hover:text-slate-700 disabled:opacity-50"
+                className="rounded-xl p-2 text-slate-400 hover:bg-slate-100 hover:text-slate-700 disabled:opacity-50"
               >
-                ×
+                <X size={20} />
               </button>
             </div>
 
-            <div className="space-y-5 px-6 py-6">
-              {error && (
-                <div className="rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-600">
-                  {error}
-                </div>
-              )}
+            <form
+              onSubmit={handleSave}
+              className="max-h-[calc(92vh-80px)] overflow-y-auto"
+            >
+              <div className="space-y-5 p-5 sm:p-6">
+                {formError && (
+                  <div className="flex items-start gap-3 rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
+                    <AlertCircle
+                      size={18}
+                      className="mt-0.5 shrink-0"
+                    />
 
-              <div>
-                <label className="mb-2 block text-sm font-medium text-slate-700">
-                  Song Title
-                </label>
+                    <span>{formError}</span>
+                  </div>
+                )}
 
-                <input
-                  type="text"
-                  value={editTitle}
-                  onChange={(e) => setEditTitle(e.target.value)}
-                  disabled={saving}
-                  className="w-full rounded-xl border border-slate-300 px-4 py-3 text-sm outline-none transition focus:border-blue-500 focus:ring-2 focus:ring-blue-100 disabled:bg-slate-100"
-                  placeholder="Enter song title"
-                />
-              </div>
-
-              <div>
-                <label className="mb-2 block text-sm font-medium text-slate-700">
-                  Category
-                </label>
-
-                <select
-                  value={editCategory}
-                  onChange={(e) => setEditCategory(e.target.value)}
-                  disabled={saving}
-                  className="w-full rounded-xl border border-slate-300 bg-white px-4 py-3 text-sm outline-none transition focus:border-blue-500 focus:ring-2 focus:ring-blue-100 disabled:bg-slate-100"
-                >
-                  <option value="">Select a category</option>
-
-                  {categories.map((item) => (
-                    <option key={item} value={item}>
-                      {item}
-                    </option>
-                  ))}
-                </select>
-              </div>
-
-              <div>
-                <div className="mb-2 flex items-center justify-between">
-                  <label className="block text-sm font-medium text-slate-700">
-                    Lyrics
+                {/* Title */}
+                <div>
+                  <label className="mb-2 block text-sm font-semibold text-slate-700">
+                    Song Title
                   </label>
 
-                  <span
-                    className={`text-xs ${
-                      editLyrics.trim().length < 30
-                        ? "text-red-500"
-                        : "text-slate-400"
-                    }`}
-                  >
-                    {editLyrics.trim().length} characters
-                  </span>
+                  <input
+                    type="text"
+                    value={title}
+                    onChange={(event) =>
+                      setTitle(event.target.value)
+                    }
+                    placeholder="Enter song title"
+                    className="h-11 w-full rounded-xl border border-slate-200 bg-white px-4 text-sm text-slate-800 outline-none transition placeholder:text-slate-400 focus:border-emerald-400 focus:ring-4 focus:ring-emerald-50"
+                  />
                 </div>
 
-                <textarea
-                  value={editLyrics}
-                  onChange={(e) => setEditLyrics(e.target.value)}
-                  disabled={saving}
-                  rows={12}
-                  className="w-full resize-y rounded-xl border border-slate-300 px-4 py-3 text-sm leading-7 outline-none transition focus:border-blue-500 focus:ring-2 focus:ring-blue-100 disabled:bg-slate-100"
-                  placeholder="Enter lyrics..."
-                />
+                {/* Category */}
+                <div>
+                  <label className="mb-2 block text-sm font-semibold text-slate-700">
+                    Category
+                  </label>
 
-                {editLyrics.trim().length < 30 && (
-                  <p className="mt-1 text-xs text-red-500">
-                    Lyrics must contain at least 30 characters.
+                  <div className="relative">
+                    <select
+                      value={category}
+                      onChange={(event) =>
+                        setCategory(event.target.value)
+                      }
+                      className="h-11 w-full appearance-none rounded-xl border border-slate-200 bg-white px-4 pr-10 text-sm text-slate-700 outline-none focus:border-emerald-400 focus:ring-4 focus:ring-emerald-50"
+                    >
+                      <option value="">Select a category</option>
+
+                      {categoryOptions.map((item) => (
+                        <option key={item} value={item}>
+                          {item}
+                        </option>
+                      ))}
+                    </select>
+
+                    <ChevronDown
+                      size={16}
+                      className="pointer-events-none absolute right-3.5 top-1/2 -translate-y-1/2 text-slate-400"
+                    />
+                  </div>
+
+                  {categoryOptions.length === 0 && (
+                    <p className="mt-2 text-xs text-amber-600">
+                      No categories found. Add a category first.
+                    </p>
+                  )}
+                </div>
+
+                {/* Lyrics */}
+                <div>
+                  <div className="mb-2 flex items-center justify-between">
+                    <label className="text-sm font-semibold text-slate-700">
+                      Lyrics
+                    </label>
+
+                    <span
+                      className={`text-xs ${
+                        lyrics.trim().length < 30
+                          ? "text-amber-600"
+                          : "text-emerald-600"
+                      }`}
+                    >
+                      {lyrics.trim().length} characters
+                    </span>
+                  </div>
+
+                  <textarea
+                    value={lyrics}
+                    onChange={(event) =>
+                      setLyrics(event.target.value)
+                    }
+                    placeholder="Enter the complete song lyrics..."
+                    rows={10}
+                    className="w-full resize-y rounded-xl border border-slate-200 bg-white px-4 py-3 text-sm leading-6 text-slate-800 outline-none transition placeholder:text-slate-400 focus:border-emerald-400 focus:ring-4 focus:ring-emerald-50"
+                  />
+
+                  <p className="mt-1.5 text-xs text-slate-400">
+                    Minimum 30 characters.
                   </p>
-                )}
+                </div>
+
+                {/* YouTube */}
+                <div>
+                  <label className="mb-2 block text-sm font-semibold text-slate-700">
+                    YouTube URL
+                    <span className="ml-2 font-normal text-slate-400">
+                      Optional
+                    </span>
+                  </label>
+
+                  <div className="relative">
+                    <ExternalLink
+                      size={16}
+                      className="absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-400"
+                    />
+
+                    <input
+                      type="url"
+                      value={youtubeUrl}
+                      onChange={(event) =>
+                        setYoutubeUrl(event.target.value)
+                      }
+                      placeholder="https://youtube.com/watch?v=..."
+                      className="h-11 w-full rounded-xl border border-slate-200 bg-white pl-10 pr-4 text-sm text-slate-800 outline-none transition placeholder:text-slate-400 focus:border-emerald-400 focus:ring-4 focus:ring-emerald-50"
+                    />
+                  </div>
+                </div>
               </div>
 
-              <div>
-                <label className="mb-2 block text-sm font-medium text-slate-700">
-                  YouTube / Audio URL
-                </label>
-
-                <input
-                  type="url"
-                  value={editYoutubeUrl}
-                  onChange={(e) =>
-                    setEditYoutubeUrl(e.target.value)
-                  }
+              {/* Footer */}
+              <div className="flex flex-col-reverse gap-3 border-t border-slate-100 bg-slate-50/70 px-5 py-4 sm:flex-row sm:justify-end sm:px-6">
+                <button
+                  type="button"
+                  onClick={closeModal}
                   disabled={saving}
-                  className="w-full rounded-xl border border-slate-300 px-4 py-3 text-sm outline-none transition focus:border-blue-500 focus:ring-2 focus:ring-blue-100 disabled:bg-slate-100"
-                  placeholder="https://youtube.com/..."
-                />
+                  className="rounded-xl border border-slate-200 bg-white px-5 py-2.5 text-sm font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-50"
+                >
+                  Cancel
+                </button>
+
+                <button
+                  type="submit"
+                  disabled={saving}
+                  className="inline-flex items-center justify-center gap-2 rounded-xl bg-emerald-600 px-5 py-2.5 text-sm font-semibold text-white shadow-sm shadow-emerald-200 hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-60"
+                >
+                  {saving ? (
+                    <>
+                      <RefreshCw
+                        size={16}
+                        className="animate-spin"
+                      />
+                      Saving...
+                    </>
+                  ) : (
+                    <>
+                      <Check size={16} />
+                      {modal === "add"
+                        ? "Save Song"
+                        : "Save Changes"}
+                    </>
+                  )}
+                </button>
               </div>
-
-              <div className="rounded-xl bg-slate-50 p-4">
-                <p className="text-xs font-semibold uppercase tracking-wide text-slate-400">
-                  Firestore Document ID
-                </p>
-
-                <p className="mt-1 break-all font-mono text-xs text-slate-600">
-                  {editingSong.id}
-                </p>
-              </div>
-            </div>
-
-            <div className="flex justify-end gap-3 border-t bg-slate-50 px-6 py-4">
-              <button
-                onClick={closeEdit}
-                disabled={saving}
-                className="rounded-lg border border-slate-300 bg-white px-5 py-2.5 text-sm font-medium text-slate-700 transition hover:bg-slate-50 disabled:opacity-50"
-              >
-                Cancel
-              </button>
-
-              <button
-                onClick={handleSaveEdit}
-                disabled={saving}
-                className="rounded-lg bg-blue-600 px-5 py-2.5 text-sm font-medium text-white transition hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-50"
-              >
-                {saving ? "Saving..." : "Save Changes"}
-              </button>
-            </div>
+            </form>
           </div>
         </div>
       )}
-    </main>
+    </div>
   );
 }
