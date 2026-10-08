@@ -1,9 +1,15 @@
-
 "use client";
 
-import { FormEvent, useCallback, useEffect, useMemo, useState } from "react";
-import Link from "next/link";
+import {
+  FormEvent,
+  useCallback,
+  useEffect,
+  useMemo,
+  useState,
+} from "react";
+
 import { useRouter } from "next/navigation";
+
 import {
   addDoc,
   collection,
@@ -15,6 +21,7 @@ import {
   Timestamp,
   updateDoc,
 } from "firebase/firestore";
+
 import { onAuthStateChanged } from "firebase/auth";
 
 import {
@@ -60,6 +67,10 @@ type Category = {
 
 type ModalType = "view" | "edit" | "add" | null;
 
+type SearchType = "all" | "name" | "category" | "lyrics";
+
+type SortOrder = "default" | "asc" | "desc";
+
 export default function SongsPage() {
   const router = useRouter();
 
@@ -70,13 +81,24 @@ export default function SongsPage() {
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState("");
 
+  // Search and filters
   const [search, setSearch] = useState("");
-  const [categoryFilter, setCategoryFilter] = useState("all");
+  const [searchType, setSearchType] =
+    useState<SearchType>("all");
+  const [categoryFilter, setCategoryFilter] =
+    useState("all");
 
-  const [selectedIds, setSelectedIds] = useState<string[]>([]);
+  // Alphabetical sorting
+  const [sortOrder, setSortOrder] =
+    useState<SortOrder>("default");
+
+  const [selectedIds, setSelectedIds] = useState<string[]>(
+    []
+  );
 
   const [modal, setModal] = useState<ModalType>(null);
-  const [selectedSong, setSelectedSong] = useState<Song | null>(null);
+  const [selectedSong, setSelectedSong] =
+    useState<Song | null>(null);
 
   const [saving, setSaving] = useState(false);
   const [deleting, setDeleting] = useState(false);
@@ -123,38 +145,40 @@ export default function SongsPage() {
           return;
         }
 
-        const [songsSnapshot, categoriesSnapshot] = await Promise.all([
-          getDocs(collection(db, "shared_songs")),
-          getDocs(collection(db, "categories")),
-        ]);
+        const [songsSnapshot, categoriesSnapshot] =
+          await Promise.all([
+            getDocs(collection(db, "shared_songs")),
+            getDocs(collection(db, "categories")),
+          ]);
 
-        const loadedSongs: Song[] = songsSnapshot.docs.map((songDoc) => {
-          const data = songDoc.data();
+        const loadedSongs: Song[] = songsSnapshot.docs.map(
+          (songDoc) => {
+            const data = songDoc.data();
 
-          return {
-            id: songDoc.id,
-            title: data.title || "",
-            lyrics: data.lyrics || "",
-            category: data.category || "",
-            youtubeUrl: data.youtubeUrl || "",
-            isFavorite: data.isFavorite,
-            isUserCreated: data.isUserCreated,
-            uploaderId: data.uploaderId,
-            createdAt: data.createdAt || null,
-            timestamp: data.timestamp || null,
-          };
-        });
+            return {
+              id: songDoc.id,
+              title: data.title || "",
+              lyrics: data.lyrics || "",
+              category: data.category || "",
+              youtubeUrl: data.youtubeUrl || "",
+              isFavorite: data.isFavorite,
+              isUserCreated: data.isUserCreated,
+              uploaderId: data.uploaderId,
+              createdAt: data.createdAt || null,
+              timestamp: data.timestamp || null,
+            };
+          }
+        );
 
-        const loadedCategories: Category[] = categoriesSnapshot.docs.map(
-          (categoryDoc) => {
+        const loadedCategories: Category[] =
+          categoriesSnapshot.docs.map((categoryDoc) => {
             const data = categoryDoc.data();
 
             return {
               id: categoryDoc.id,
               name: data.name || "",
             };
-          }
-        );
+          });
 
         setSongs(loadedSongs);
         setCategories(loadedCategories);
@@ -182,8 +206,8 @@ export default function SongsPage() {
     return () => unsubscribe();
   }, [loadData, router]);
 
-  // Category options include both Firestore categories and categories
-  // already used by existing songs.
+  // Category options include both Firestore categories
+  // and categories already used by existing songs.
   const categoryOptions = useMemo(() => {
     const names = new Set<string>();
 
@@ -204,15 +228,44 @@ export default function SongsPage() {
     );
   }, [categories, songs]);
 
+  // Search + category filtering + alphabetical sorting.
+  //
+  // Search type:
+  // - all      = title + lyrics + category
+  // - name     = title only
+  // - category = category only
+  // - lyrics   = lyrics only
+  //
+  // Sort:
+  // - default = Firestore/current order
+  // - asc     = A → Z
+  // - desc    = Z → A
   const filteredSongs = useMemo(() => {
     const query = search.trim().toLowerCase();
 
-    return songs.filter((song) => {
-      const matchesSearch =
-        !query ||
-        song.title.toLowerCase().includes(query) ||
-        song.lyrics.toLowerCase().includes(query) ||
-        song.category.toLowerCase().includes(query);
+    const result = songs.filter((song) => {
+      let matchesSearch = true;
+
+      if (query) {
+        const titleText = song.title.toLowerCase();
+        const lyricsText = song.lyrics.toLowerCase();
+        const categoryText =
+          song.category.toLowerCase();
+
+        if (searchType === "name") {
+          matchesSearch = titleText.includes(query);
+        } else if (searchType === "category") {
+          matchesSearch =
+            categoryText.includes(query);
+        } else if (searchType === "lyrics") {
+          matchesSearch = lyricsText.includes(query);
+        } else {
+          matchesSearch =
+            titleText.includes(query) ||
+            lyricsText.includes(query) ||
+            categoryText.includes(query);
+        }
+      }
 
       const matchesCategory =
         categoryFilter === "all" ||
@@ -220,10 +273,36 @@ export default function SongsPage() {
 
       return matchesSearch && matchesCategory;
     });
-  }, [songs, search, categoryFilter]);
+
+    if (sortOrder === "asc") {
+      result.sort((a, b) =>
+        a.title.localeCompare(b.title, "am", {
+          sensitivity: "base",
+        })
+      );
+    }
+
+    if (sortOrder === "desc") {
+      result.sort((a, b) =>
+        b.title.localeCompare(a.title, "am", {
+          sensitivity: "base",
+        })
+      );
+    }
+
+    return result;
+  }, [
+    songs,
+    search,
+    searchType,
+    categoryFilter,
+    sortOrder,
+  ]);
 
   const audioCount = useMemo(
-    () => songs.filter((song) => song.youtubeUrl.trim()).length,
+    () =>
+      songs.filter((song) => song.youtubeUrl.trim())
+        .length,
     [songs]
   );
 
@@ -231,7 +310,9 @@ export default function SongsPage() {
 
   const allVisibleSelected =
     filteredSongs.length > 0 &&
-    filteredSongs.every((song) => selectedIds.includes(song.id));
+    filteredSongs.every((song) =>
+      selectedIds.includes(song.id)
+    );
 
   function openView(song: Song) {
     setSelectedSong(song);
@@ -275,11 +356,15 @@ export default function SongsPage() {
   }
 
   function toggleSelectAllVisible() {
-    const visibleIds = filteredSongs.map((song) => song.id);
+    const visibleIds = filteredSongs.map(
+      (song) => song.id
+    );
 
     if (allVisibleSelected) {
       setSelectedIds((current) =>
-        current.filter((id) => !visibleIds.includes(id))
+        current.filter(
+          (id) => !visibleIds.includes(id)
+        )
       );
     } else {
       setSelectedIds((current) => {
@@ -290,6 +375,13 @@ export default function SongsPage() {
         return Array.from(next);
       });
     }
+  }
+
+  function clearFilters() {
+    setSearch("");
+    setSearchType("all");
+    setCategoryFilter("all");
+    setSortOrder("default");
   }
 
   function validateSongForm() {
@@ -330,15 +422,19 @@ export default function SongsPage() {
       const user = auth.currentUser;
 
       if (!user) {
-        setFormError("Your session has expired. Please sign in again.");
+        setFormError(
+          "Your session has expired. Please sign in again."
+        );
         return;
       }
 
-      const normalizedTitle = title.trim().toLowerCase();
+      const normalizedTitle =
+        title.trim().toLowerCase();
 
       const duplicate = songs.find(
         (song) =>
-          song.title.trim().toLowerCase() === normalizedTitle &&
+          song.title.trim().toLowerCase() ===
+            normalizedTitle &&
           song.id !== selectedSong?.id
       );
 
@@ -350,17 +446,20 @@ export default function SongsPage() {
       }
 
       if (modal === "add") {
-        const docRef = await addDoc(collection(db, "shared_songs"), {
-          title: title.trim(),
-          lyrics: lyrics.trim(),
-          category: category.trim(),
-          youtubeUrl: youtubeUrl.trim(),
-          isFavorite: false,
-          isUserCreated: true,
-          uploaderId: user.uid,
-          createdAt: serverTimestamp(),
-          timestamp: serverTimestamp(),
-        });
+        const docRef = await addDoc(
+          collection(db, "shared_songs"),
+          {
+            title: title.trim(),
+            lyrics: lyrics.trim(),
+            category: category.trim(),
+            youtubeUrl: youtubeUrl.trim(),
+            isFavorite: false,
+            isUserCreated: true,
+            uploaderId: user.uid,
+            createdAt: serverTimestamp(),
+            timestamp: serverTimestamp(),
+          }
+        );
 
         const newSong: Song = {
           id: docRef.id,
@@ -379,12 +478,15 @@ export default function SongsPage() {
       }
 
       if (modal === "edit" && selectedSong) {
-        await updateDoc(doc(db, "shared_songs", selectedSong.id), {
-          title: title.trim(),
-          lyrics: lyrics.trim(),
-          category: category.trim(),
-          youtubeUrl: youtubeUrl.trim(),
-        });
+        await updateDoc(
+          doc(db, "shared_songs", selectedSong.id),
+          {
+            title: title.trim(),
+            lyrics: lyrics.trim(),
+            category: category.trim(),
+            youtubeUrl: youtubeUrl.trim(),
+          }
+        );
 
         setSongs((current) =>
           current.map((song) =>
@@ -404,7 +506,9 @@ export default function SongsPage() {
       closeModal();
     } catch (err) {
       console.error("Save song error:", err);
-      setFormError("Unable to save the song. Please try again.");
+      setFormError(
+        "Unable to save the song. Please try again."
+      );
     } finally {
       setSaving(false);
     }
@@ -420,7 +524,9 @@ export default function SongsPage() {
     setDeleting(true);
 
     try {
-      await deleteDoc(doc(db, "shared_songs", song.id));
+      await deleteDoc(
+        doc(db, "shared_songs", song.id)
+      );
 
       setSongs((current) =>
         current.filter((item) => item.id !== song.id)
@@ -471,7 +577,9 @@ export default function SongsPage() {
       );
 
       setSongs((current) =>
-        current.filter((song) => !selectedIds.includes(song.id))
+        current.filter(
+          (song) => !selectedIds.includes(song.id)
+        )
       );
 
       setSelectedIds([]);
@@ -502,6 +610,7 @@ export default function SongsPage() {
       <div className="mx-auto max-w-7xl space-y-6">
         <div className="animate-pulse">
           <div className="h-8 w-48 rounded-lg bg-slate-200" />
+
           <div className="mt-3 h-4 w-72 rounded bg-slate-200" />
         </div>
 
@@ -534,7 +643,8 @@ export default function SongsPage() {
           </h1>
 
           <p className="mt-2 text-sm text-slate-500">
-            Manage your Netsir songs, lyrics, categories, and audio.
+            Manage your Netsir songs, lyrics, categories,
+            and audio.
           </p>
         </div>
 
@@ -547,7 +657,9 @@ export default function SongsPage() {
           >
             <RefreshCw
               size={16}
-              className={refreshing ? "animate-spin" : ""}
+              className={
+                refreshing ? "animate-spin" : ""
+              }
             />
             Refresh
           </button>
@@ -567,6 +679,7 @@ export default function SongsPage() {
       {error && (
         <div className="flex items-center gap-3 rounded-2xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
           <AlertCircle size={18} />
+
           <span className="flex-1">{error}</span>
 
           <button
@@ -641,7 +754,41 @@ export default function SongsPage() {
         {/* Toolbar */}
         <div className="border-b border-slate-100 p-4 sm:p-5">
           <div className="flex flex-col gap-3 lg:flex-row">
-            {/* Search */}
+            {/* Search type */}
+            <div className="relative lg:w-44">
+              <select
+                value={searchType}
+                onChange={(event) =>
+                  setSearchType(
+                    event.target.value as SearchType
+                  )
+                }
+                className="h-11 w-full appearance-none rounded-xl border border-slate-200 bg-slate-50 px-4 pr-10 text-sm font-medium text-slate-700 outline-none transition focus:border-emerald-400 focus:bg-white focus:ring-4 focus:ring-emerald-50"
+              >
+                <option value="all">
+                  All Fields
+                </option>
+
+                <option value="name">
+                  Name
+                </option>
+
+                <option value="category">
+                  Category
+                </option>
+
+                <option value="lyrics">
+                  Lyrics
+                </option>
+              </select>
+
+              <ChevronDown
+                size={16}
+                className="pointer-events-none absolute right-3.5 top-1/2 -translate-y-1/2 text-slate-400"
+              />
+            </div>
+
+            {/* Search input */}
             <div className="relative flex-1">
               <Search
                 size={18}
@@ -651,9 +798,19 @@ export default function SongsPage() {
               <input
                 type="text"
                 value={search}
-                onChange={(event) => setSearch(event.target.value)}
-                placeholder="Search by title, lyrics, or category..."
-                className="h-11 w-full rounded-xl border border-slate-200 bg-slate-50 pl-10 pr-4 text-sm text-slate-800 outline-none transition placeholder:text-slate-400 focus:border-emerald-400 focus:bg-white focus:ring-4 focus:ring-emerald-50"
+                onChange={(event) =>
+                  setSearch(event.target.value)
+                }
+                placeholder={
+                  searchType === "name"
+                    ? "Search by song name..."
+                    : searchType === "category"
+                      ? "Search by category..."
+                      : searchType === "lyrics"
+                        ? "Search in lyrics..."
+                        : "Search by name, lyrics, or category..."
+                }
+                className="h-11 w-full rounded-xl border border-slate-200 bg-slate-50 pl-10 pr-10 text-sm text-slate-800 outline-none transition placeholder:text-slate-400 focus:border-emerald-400 focus:bg-white focus:ring-4 focus:ring-emerald-50"
               />
 
               {search && (
@@ -667,7 +824,7 @@ export default function SongsPage() {
               )}
             </div>
 
-            {/* Category */}
+            {/* Category filter */}
             <div className="relative lg:w-56">
               <FolderOpen
                 size={16}
@@ -681,13 +838,45 @@ export default function SongsPage() {
                 }
                 className="h-11 w-full appearance-none rounded-xl border border-slate-200 bg-slate-50 pl-10 pr-10 text-sm text-slate-700 outline-none focus:border-emerald-400 focus:bg-white focus:ring-4 focus:ring-emerald-50"
               >
-                <option value="all">All Categories</option>
+                <option value="all">
+                  All Categories
+                </option>
 
                 {categoryOptions.map((item) => (
                   <option key={item} value={item}>
                     {item}
                   </option>
                 ))}
+              </select>
+
+              <ChevronDown
+                size={16}
+                className="pointer-events-none absolute right-3.5 top-1/2 -translate-y-1/2 text-slate-400"
+              />
+            </div>
+
+            {/* Alphabetical sorting */}
+            <div className="relative lg:w-48">
+              <select
+                value={sortOrder}
+                onChange={(event) =>
+                  setSortOrder(
+                    event.target.value as SortOrder
+                  )
+                }
+                className="h-11 w-full appearance-none rounded-xl border border-slate-200 bg-slate-50 px-4 pr-10 text-sm font-medium text-slate-700 outline-none transition focus:border-emerald-400 focus:bg-white focus:ring-4 focus:ring-emerald-50"
+              >
+                <option value="default">
+                  Default Order
+                </option>
+
+                <option value="asc">
+                  A → Z
+                </option>
+
+                <option value="desc">
+                  Z → A
+                </option>
               </select>
 
               <ChevronDown
@@ -711,13 +900,13 @@ export default function SongsPage() {
               songs
             </p>
 
-            {(search || categoryFilter !== "all") && (
+            {(search ||
+              searchType !== "all" ||
+              categoryFilter !== "all" ||
+              sortOrder !== "default") && (
               <button
                 type="button"
-                onClick={() => {
-                  setSearch("");
-                  setCategoryFilter("all");
-                }}
+                onClick={clearFilters}
                 className="text-xs font-medium text-emerald-600 hover:text-emerald-700"
               >
                 Clear filters
@@ -726,12 +915,56 @@ export default function SongsPage() {
           </div>
         </div>
 
+        {/* Active search/sort information */}
+        {(search ||
+          searchType !== "all" ||
+          sortOrder !== "default") && (
+          <div className="border-b border-slate-100 bg-slate-50/50 px-4 py-2.5 sm:px-5">
+            <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-slate-500">
+              {(search || searchType !== "all") && (
+                <span>
+                  Searching{" "}
+                  <span className="font-semibold text-slate-700">
+                    {searchType === "name"
+                      ? "song names"
+                      : searchType === "category"
+                        ? "categories"
+                        : searchType === "lyrics"
+                          ? "lyrics"
+                          : "all fields"}
+                  </span>
+                  {search && (
+                    <>
+                      {" "}
+                      for{" "}
+                      <span className="font-semibold text-emerald-700">
+                        "{search}"
+                      </span>
+                    </>
+                  )}
+                </span>
+              )}
+
+              {sortOrder !== "default" && (
+                <span className="font-medium text-slate-600">
+                  •{" "}
+                  {sortOrder === "asc"
+                    ? "A → Z"
+                    : "Z → A"}
+                </span>
+              )}
+            </div>
+          </div>
+        )}
+
         {/* Bulk toolbar */}
         {selectedCount > 0 && (
           <div className="flex flex-col gap-3 border-b border-red-100 bg-red-50 px-4 py-3 sm:flex-row sm:items-center sm:justify-between sm:px-5">
             <div className="flex items-center gap-2 text-sm font-medium text-red-700">
               <CheckCircle2 size={17} />
-              {selectedCount} song{selectedCount !== 1 ? "s" : ""} selected
+
+              {selectedCount} song
+              {selectedCount !== 1 ? "s" : ""} selected
             </div>
 
             <div className="flex items-center gap-2">
@@ -750,7 +983,10 @@ export default function SongsPage() {
                 className="inline-flex items-center gap-2 rounded-lg bg-red-600 px-3 py-2 text-xs font-semibold text-white hover:bg-red-700 disabled:opacity-60"
               >
                 <Trash2 size={14} />
-                {deleting ? "Deleting..." : `Delete ${selectedCount}`}
+
+                {deleting
+                  ? "Deleting..."
+                  : `Delete ${selectedCount}`}
               </button>
             </div>
           </div>
@@ -801,7 +1037,9 @@ export default function SongsPage() {
 
             <tbody className="divide-y divide-slate-100">
               {filteredSongs.map((song) => {
-                const selected = selectedIds.includes(song.id);
+                const selected = selectedIds.includes(
+                  song.id
+                );
 
                 return (
                   <tr
@@ -813,7 +1051,9 @@ export default function SongsPage() {
                     <td className="px-5 py-4">
                       <button
                         type="button"
-                        onClick={() => toggleSelection(song.id)}
+                        onClick={() =>
+                          toggleSelection(song.id)
+                        }
                         className="flex items-center justify-center text-slate-400 hover:text-emerald-600"
                       >
                         {selected ? (
@@ -830,7 +1070,9 @@ export default function SongsPage() {
                     <td className="max-w-[360px] px-3 py-4">
                       <div className="flex items-center gap-3">
                         <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-emerald-50 text-sm font-bold text-emerald-700">
-                          {song.title.trim().charAt(0) || "♪"}
+                          {song.title
+                            .trim()
+                            .charAt(0) || "♪"}
                         </div>
 
                         <div className="min-w-0">
@@ -847,7 +1089,8 @@ export default function SongsPage() {
 
                     <td className="px-3 py-4">
                       <span className="inline-flex max-w-[150px] truncate rounded-lg bg-slate-100 px-2.5 py-1 text-xs font-medium text-slate-600">
-                        {song.category || "Uncategorized"}
+                        {song.category ||
+                          "Uncategorized"}
                       </span>
                     </td>
 
@@ -881,7 +1124,9 @@ export default function SongsPage() {
                           <div className="absolute right-0 top-10 z-20 w-44 overflow-hidden rounded-xl border border-slate-200 bg-white p-1.5 shadow-xl">
                             <button
                               type="button"
-                              onClick={() => openView(song)}
+                              onClick={() =>
+                                openView(song)
+                              }
                               className="flex w-full items-center gap-2.5 rounded-lg px-3 py-2.5 text-left text-xs font-medium text-slate-600 hover:bg-slate-50"
                             >
                               <Eye size={15} />
@@ -890,7 +1135,9 @@ export default function SongsPage() {
 
                             <button
                               type="button"
-                              onClick={() => openEdit(song)}
+                              onClick={() =>
+                                openEdit(song)
+                              }
                               className="flex w-full items-center gap-2.5 rounded-lg px-3 py-2.5 text-left text-xs font-medium text-slate-600 hover:bg-slate-50"
                             >
                               <Pencil size={15} />
@@ -904,7 +1151,9 @@ export default function SongsPage() {
                                 rel="noopener noreferrer"
                                 className="flex w-full items-center gap-2.5 rounded-lg px-3 py-2.5 text-left text-xs font-medium text-slate-600 hover:bg-slate-50"
                               >
-                                <ExternalLink size={15} />
+                                <ExternalLink
+                                  size={15}
+                                />
                                 Open Audio
                               </a>
                             )}
@@ -913,7 +1162,9 @@ export default function SongsPage() {
 
                             <button
                               type="button"
-                              onClick={() => deleteSong(song)}
+                              onClick={() =>
+                                deleteSong(song)
+                              }
                               disabled={deleting}
                               className="flex w-full items-center gap-2.5 rounded-lg px-3 py-2.5 text-left text-xs font-medium text-red-600 hover:bg-red-50"
                             >
@@ -934,7 +1185,9 @@ export default function SongsPage() {
         {/* Mobile cards */}
         <div className="divide-y divide-slate-100 md:hidden">
           {filteredSongs.map((song) => {
-            const selected = selectedIds.includes(song.id);
+            const selected = selectedIds.includes(
+              song.id
+            );
 
             return (
               <div
@@ -946,7 +1199,9 @@ export default function SongsPage() {
                 <div className="flex items-start gap-3">
                   <button
                     type="button"
-                    onClick={() => toggleSelection(song.id)}
+                    onClick={() =>
+                      toggleSelection(song.id)
+                    }
                     className="mt-1 shrink-0 text-slate-400"
                   >
                     {selected ? (
@@ -971,13 +1226,16 @@ export default function SongsPage() {
                         </p>
 
                         <p className="mt-1 text-xs text-slate-400">
-                          {song.category || "Uncategorized"}
+                          {song.category ||
+                            "Uncategorized"}
                         </p>
                       </div>
 
                       <button
                         type="button"
-                        onClick={() => openView(song)}
+                        onClick={() =>
+                          openView(song)
+                        }
                         className="shrink-0 rounded-lg p-2 text-slate-400 hover:bg-slate-100 hover:text-slate-700"
                       >
                         <Eye size={17} />
@@ -1007,7 +1265,9 @@ export default function SongsPage() {
 
                       <button
                         type="button"
-                        onClick={() => openEdit(song)}
+                        onClick={() =>
+                          openEdit(song)
+                        }
                         className="ml-auto inline-flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-xs font-medium text-slate-600 hover:bg-slate-100"
                       >
                         <Pencil size={13} />
@@ -1016,7 +1276,9 @@ export default function SongsPage() {
 
                       <button
                         type="button"
-                        onClick={() => deleteSong(song)}
+                        onClick={() =>
+                          deleteSong(song)
+                        }
                         className="inline-flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-xs font-medium text-red-600 hover:bg-red-50"
                       >
                         <Trash2 size={13} />
@@ -1061,10 +1323,7 @@ export default function SongsPage() {
             ) : (
               <button
                 type="button"
-                onClick={() => {
-                  setSearch("");
-                  setCategoryFilter("all");
-                }}
+                onClick={clearFilters}
                 className="mt-5 text-sm font-medium text-emerald-600 hover:text-emerald-700"
               >
                 Clear filters
@@ -1101,7 +1360,9 @@ export default function SongsPage() {
             <div className="max-h-[calc(90vh-80px)] overflow-y-auto p-5 sm:p-6">
               <div className="mb-6 flex items-start gap-4">
                 <div className="flex h-14 w-14 shrink-0 items-center justify-center rounded-2xl bg-emerald-50 text-lg font-bold text-emerald-700">
-                  {selectedSong.title.trim().charAt(0) || "♪"}
+                  {selectedSong.title
+                    .trim()
+                    .charAt(0) || "♪"}
                 </div>
 
                 <div className="min-w-0">
@@ -1111,7 +1372,8 @@ export default function SongsPage() {
 
                   <div className="mt-2 flex flex-wrap gap-2">
                     <span className="rounded-lg bg-slate-100 px-2.5 py-1 text-xs font-medium text-slate-600">
-                      {selectedSong.category || "Uncategorized"}
+                      {selectedSong.category ||
+                        "Uncategorized"}
                     </span>
 
                     {selectedSong.youtubeUrl && (
@@ -1248,10 +1510,15 @@ export default function SongsPage() {
                       }
                       className="h-11 w-full appearance-none rounded-xl border border-slate-200 bg-white px-4 pr-10 text-sm text-slate-700 outline-none focus:border-emerald-400 focus:ring-4 focus:ring-emerald-50"
                     >
-                      <option value="">Select a category</option>
+                      <option value="">
+                        Select a category
+                      </option>
 
                       {categoryOptions.map((item) => (
-                        <option key={item} value={item}>
+                        <option
+                          key={item}
+                          value={item}
+                        >
                           {item}
                         </option>
                       ))}
@@ -1265,7 +1532,8 @@ export default function SongsPage() {
 
                   {categoryOptions.length === 0 && (
                     <p className="mt-2 text-xs text-amber-600">
-                      No categories found. Add a category first.
+                      No categories found. Add a category
+                      first.
                     </p>
                   )}
                 </div>
@@ -1322,7 +1590,9 @@ export default function SongsPage() {
                       type="url"
                       value={youtubeUrl}
                       onChange={(event) =>
-                        setYoutubeUrl(event.target.value)
+                        setYoutubeUrl(
+                          event.target.value
+                        )
                       }
                       placeholder="https://youtube.com/watch?v=..."
                       className="h-11 w-full rounded-xl border border-slate-200 bg-white pl-10 pr-4 text-sm text-slate-800 outline-none transition placeholder:text-slate-400 focus:border-emerald-400 focus:ring-4 focus:ring-emerald-50"
@@ -1358,6 +1628,7 @@ export default function SongsPage() {
                   ) : (
                     <>
                       <Check size={16} />
+
                       {modal === "add"
                         ? "Save Song"
                         : "Save Changes"}
