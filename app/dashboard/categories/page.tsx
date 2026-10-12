@@ -10,6 +10,7 @@ import {
   getDoc,
   getDocs,
   serverTimestamp,
+  updateDoc,
   writeBatch,
 } from "firebase/firestore";
 import { onAuthStateChanged } from "firebase/auth";
@@ -21,6 +22,13 @@ type Category = {
   name: string;
   createdAt?: any;
   updatedAt?: any;
+  createdBy?: string;
+  createdByUid?: string;
+  createdByEmail?: string;
+  userId?: string;
+  ownerId?: string;
+  isUserCreated?: boolean;
+  isVirtual?: boolean;
 };
 
 type Song = {
@@ -29,6 +37,12 @@ type Song = {
   lyrics?: string;
   category?: string;
   youtubeUrl?: string;
+  isUserCreated?: boolean;
+  uploaderId?: string;
+  uploaderName?: string;
+  uploaderEmail?: string;
+  createdBy?: string;
+  userId?: string;
 };
 
 export default function CategoriesPage() {
@@ -41,11 +55,14 @@ export default function CategoriesPage() {
   const [saving, setSaving] = useState(false);
 
   const [search, setSearch] = useState("");
+  const [categoryTypeFilter, setCategoryTypeFilter] = useState<"all" | "user">("all");
   const [error, setError] = useState("");
 
   const [showAddModal, setShowAddModal] = useState(false);
   const [showEditModal, setShowEditModal] = useState(false);
   const [showSongsModal, setShowSongsModal] = useState(false);
+  const [showDeleteModal, setShowDeleteModal] = useState(false);
+  const [deleteTargetCategory, setDeleteTargetCategory] = useState("");
 
   const [selectedCategory, setSelectedCategory] =
     useState<Category | null>(null);
@@ -111,10 +128,33 @@ export default function CategoriesPage() {
       // ONLY categories from Firestore.
       // No default or hardcoded categories.
       const categoryData: Category[] = categorySnapshot.docs
-        .map((item) => ({
-          id: item.id,
-          ...(item.data() as Omit<Category, "id">),
-        }))
+        .map((item) => {
+          const data = item.data();
+          const creator =
+            data.createdByName ||
+            data.createdBy ||
+            data.createdByEmail ||
+            data.creatorEmail ||
+            data.createdByUid ||
+            data.creatorUid ||
+            data.userId ||
+            data.ownerId ||
+            data.ownerUid ||
+            "";
+
+          return {
+            id: item.id,
+            ...(data as Omit<Category, "id">),
+            createdBy: creator,
+            isUserCreated:
+              data.isUserCreated === true ||
+              Boolean(
+                data.createdBy || data.createdByName || data.createdByEmail ||
+                data.creatorEmail || data.createdByUid || data.creatorUid ||
+                data.userId || data.ownerId || data.ownerUid
+              ),
+          };
+        })
         .sort((a, b) => a.name.localeCompare(b.name));
 
       const songData: Song[] = songSnapshot.docs.map((item) => ({
@@ -122,7 +162,39 @@ export default function CategoriesPage() {
         ...(item.data() as Omit<Song, "id">),
       }));
 
-      setCategories(categoryData);
+      // Some user-submitted songs may use categories that have no document
+      // in /categories. Include those category names in this page too.
+      // The category creator itself can only be identified if creator metadata
+      // was saved in Firestore.
+      const knownNames = new Set(
+        categoryData.map((category) => category.name.trim().toLowerCase())
+      );
+      const userCategoryMap = new Map<string, Category>();
+
+      songData.forEach((song) => {
+        const name = (song.category || "").trim();
+        const isUserSong = song.isUserCreated === true;
+        const key = name.toLowerCase();
+
+        if (!name || !isUserSong || knownNames.has(key)) return;
+
+        if (!userCategoryMap.has(key)) {
+          userCategoryMap.set(key, {
+            id: `user-category-${key}`,
+            name,
+            createdBy: song.uploaderName || song.uploaderEmail || song.createdBy || song.uploaderId || song.userId || "User-submitted songs",
+            createdByUid: song.uploaderId || song.userId,
+            createdByEmail: song.uploaderEmail,
+            isUserCreated: true,
+            isVirtual: true,
+          });
+        }
+      });
+
+      const combinedCategories = [...categoryData, ...userCategoryMap.values()]
+        .sort((a, b) => a.name.localeCompare(b.name));
+
+      setCategories(combinedCategories);
       setSongs(songData);
     } catch (err) {
       console.error("Failed to load categories:", err);
@@ -149,14 +221,12 @@ export default function CategoriesPage() {
   const filteredCategories = useMemo(() => {
     const query = search.trim().toLowerCase();
 
-    if (!query) {
-      return categories;
-    }
-
-    return categories.filter((category) =>
-      category.name.toLowerCase().includes(query)
-    );
-  }, [categories, search]);
+    return categories.filter((category) => {
+      const matchesSearch = !query || category.name.toLowerCase().includes(query);
+      const matchesType = categoryTypeFilter === "all" || category.isUserCreated === true;
+      return matchesSearch && matchesType;
+    });
+  }, [categories, search, categoryTypeFilter]);
 
   // ============================================================
   // ADD CATEGORY
@@ -263,12 +333,13 @@ export default function CategoriesPage() {
       const batch = writeBatch(db);
 
       // Update category document.
-      const categoryRef = doc(db, "categories", selectedCategory.id);
-
-      batch.update(categoryRef, {
-        name: newName,
-        updatedAt: serverTimestamp(),
-      });
+      if (!selectedCategory.isVirtual) {
+        const categoryRef = doc(db, "categories", selectedCategory.id);
+        batch.update(categoryRef, {
+          name: newName,
+          updatedAt: serverTimestamp(),
+        });
+      }
 
       // Update every song using the old category.
       affectedSongs.forEach((song) => {
@@ -321,40 +392,120 @@ export default function CategoriesPage() {
   }
 
   // ============================================================
+  // MOVE A SONG TO ANOTHER CATEGORY
+  // ============================================================
+
+  async function handleMoveSong(song: Song, targetCategoryName: string) {
+    const target = targetCategoryName.trim();
+    const currentCategory = (song.category || "").trim();
+
+    if (!target || target.toLowerCase() === currentCategory.toLowerCase()) return;
+
+    setSaving(true);
+    setError("");
+
+    try {
+      await updateDoc(doc(db, "shared_songs", song.id), {
+        category: target,
+        updatedAt: serverTimestamp(),
+      });
+
+      const updatedSong = { ...song, category: target };
+      setSongs((current) => current.map((item) => item.id === song.id ? updatedSong : item));
+      setSelectedSongs((current) => current.filter((item) => item.id !== song.id));
+    } catch (err) {
+      console.error("Move song error:", err);
+      setError("Unable to move the song. Check your Firestore permissions.");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  // ============================================================
   // DELETE CATEGORY
   // ============================================================
 
   async function handleDeleteCategory(category: Category) {
     const count = getSongCount(category.name);
 
-    let confirmed = false;
-
     if (count > 0) {
-      confirmed = window.confirm(
-        `"${category.name}" contains ${count} song${
-          count === 1 ? "" : "s"
-        }.\n\nDeleting this category will NOT delete the songs.\n\nDo you want to delete the category?`
+      const destinations = categories.filter(
+        (item) => item.name.trim().toLowerCase() !== category.name.trim().toLowerCase()
       );
-    } else {
-      confirmed = window.confirm(
-        `Delete the category "${category.name}"?\n\nThis category has no songs.`
-      );
+      if (destinations.length === 0) {
+        alert("Create another category first, then move the songs before deleting this category.");
+        return;
+      }
+      setSelectedCategory(category);
+      setDeleteTargetCategory(destinations[0].name);
+      setShowDeleteModal(true);
+      return;
     }
 
-    if (!confirmed) return;
+    if (!window.confirm(`Delete the category "${category.name}"?`)) return;
 
     try {
-      await deleteDoc(doc(db, "categories", category.id));
-
-      setCategories((current) =>
-        current.filter((item) => item.id !== category.id)
-      );
+      if (!category.isVirtual) {
+        await deleteDoc(doc(db, "categories", category.id));
+      }
+      setCategories((current) => current.filter((item) => item.id !== category.id));
     } catch (err) {
       console.error("Delete category error:", err);
+      alert("Unable to delete the category. Please check your Firestore permissions.");
+    }
+  }
 
-      alert(
-        "Unable to delete the category. Please check your Firestore permissions."
-      );
+  async function handleMoveAllAndDeleteCategory() {
+    if (!selectedCategory) return;
+
+    const sourceName = selectedCategory.name.trim();
+    const targetName = deleteTargetCategory.trim();
+    const affectedSongs = songs.filter(
+      (song) => (song.category || "").trim().toLowerCase() === sourceName.toLowerCase()
+    );
+
+    if (!targetName || targetName.toLowerCase() === sourceName.toLowerCase()) {
+      setError("Choose a different destination category.");
+      return;
+    }
+
+    if (!window.confirm(`Move ${affectedSongs.length} song(s) from "${sourceName}" to "${targetName}" and delete the category?`)) return;
+
+    setSaving(true);
+    setError("");
+
+    try {
+      // Firestore web batches are limited to 500 writes. Use smaller chunks
+      // so categories with many songs can be moved safely.
+      for (let i = 0; i < affectedSongs.length; i += 450) {
+        const batch = writeBatch(db);
+        affectedSongs.slice(i, i + 450).forEach((song) => {
+          batch.update(doc(db, "shared_songs", song.id), {
+            category: targetName,
+            updatedAt: serverTimestamp(),
+          });
+        });
+        await batch.commit();
+      }
+
+      if (!selectedCategory.isVirtual) {
+        await deleteDoc(doc(db, "categories", selectedCategory.id));
+      }
+
+      setSongs((current) => current.map((song) =>
+        (song.category || "").trim().toLowerCase() === sourceName.toLowerCase()
+          ? { ...song, category: targetName }
+          : song
+      ));
+      setCategories((current) => current.filter((item) => item.id !== selectedCategory.id));
+      setShowDeleteModal(false);
+      setSelectedCategory(null);
+      setDeleteTargetCategory("");
+    } catch (err) {
+      console.error("Move songs and delete category error:", err);
+      setError("Unable to move the songs and delete the category. Please refresh and try again.");
+    } finally {
+      setSaving(false);
     }
   }
 
@@ -484,6 +635,16 @@ export default function CategoriesPage() {
             </span>
           </div>
 
+          <select
+            value={categoryTypeFilter}
+            onChange={(event) => setCategoryTypeFilter(event.target.value as "all" | "user")}
+            className="rounded-xl border border-slate-300 bg-white px-4 py-3 text-sm font-semibold text-slate-700 outline-none focus:border-emerald-500"
+            aria-label="Filter categories"
+          >
+            <option value="all">All categories</option>
+            <option value="user">User-created categories</option>
+          </select>
+
           <button
             onClick={loadData}
             disabled={loading}
@@ -573,7 +734,14 @@ export default function CategoriesPage() {
                           >
                             <div className="font-semibold text-slate-900 hover:text-emerald-600">
                               {category.name}
+                              {category.isUserCreated && (
+                                <span className="ml-2 rounded-full bg-amber-100 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-amber-800">User category</span>
+                              )}
                             </div>
+
+                            {category.createdBy && (
+                              <div className="mt-1 text-xs text-slate-500">Created by: {category.createdBy}</div>
+                            )}
 
                             <div className="mt-1 text-xs text-slate-400">
                               ID: {category.id}
@@ -642,7 +810,14 @@ export default function CategoriesPage() {
                       >
                         <h2 className="break-words text-lg font-bold text-slate-900">
                           {category.name}
+                          {category.isUserCreated && (
+                            <span className="ml-2 rounded-full bg-amber-100 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-amber-800">User category</span>
+                          )}
                         </h2>
+
+                        {category.createdBy && (
+                          <p className="mt-1 text-xs text-slate-500">Created by: {category.createdBy}</p>
+                        )}
 
                         <p className="mt-1 text-xs text-slate-400">
                           Created {formatDate(category.createdAt)}
@@ -918,6 +1093,28 @@ export default function CategoriesPage() {
                               ID: {song.id}
                             </span>
                           </div>
+
+                          <div className="mt-4 flex flex-col gap-2 sm:flex-row">
+                            <select
+                              defaultValue=""
+                              disabled={saving}
+                              onChange={(event) => {
+                                const target = event.target.value;
+                                if (target) {
+                                  void handleMoveSong(song, target);
+                                  event.target.value = "";
+                                }
+                              }}
+                              className="min-w-0 flex-1 rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-700 outline-none focus:border-emerald-500"
+                            >
+                              <option value="">Move song to category...</option>
+                              {categories
+                                .filter((category) => category.name.trim().toLowerCase() !== (song.category || "").trim().toLowerCase())
+                                .map((category) => (
+                                  <option key={category.id} value={category.name}>{category.name}</option>
+                                ))}
+                            </select>
+                          </div>
                         </div>
                       </div>
                     </div>
@@ -938,6 +1135,43 @@ export default function CategoriesPage() {
               >
                 Close
               </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {showDeleteModal && selectedCategory && (
+        <div className="fixed inset-0 z-[60] flex items-center justify-center overflow-y-auto bg-black/50 px-4 py-8">
+          <div className="w-full max-w-lg rounded-2xl bg-white p-6 shadow-2xl">
+            <h2 className="text-xl font-bold text-slate-900">Move songs and delete category</h2>
+            <p className="mt-2 text-sm leading-6 text-slate-600">
+              The category <strong>{selectedCategory.name}</strong> contains {getSongCount(selectedCategory.name)} song(s). Choose where to move them before deleting this category. The songs will not be deleted.
+            </p>
+
+            <label className="mt-5 block text-sm font-semibold text-slate-700">Destination category</label>
+            <select
+              value={deleteTargetCategory}
+              onChange={(event) => setDeleteTargetCategory(event.target.value)}
+              className="mt-2 w-full rounded-xl border border-slate-300 bg-white px-4 py-3 text-sm outline-none focus:border-emerald-500 focus:ring-2 focus:ring-emerald-100"
+            >
+              {categories
+                .filter((category) => category.name.trim().toLowerCase() !== selectedCategory.name.trim().toLowerCase())
+                .map((category) => <option key={category.id} value={category.name}>{category.name}</option>)}
+            </select>
+
+            {error && <p className="mt-3 text-sm text-red-600">{error}</p>}
+
+            <div className="mt-6 flex flex-col-reverse gap-3 sm:flex-row sm:justify-end">
+              <button
+                onClick={() => { setShowDeleteModal(false); setSelectedCategory(null); setDeleteTargetCategory(""); setError(""); }}
+                disabled={saving}
+                className="rounded-xl border border-slate-300 px-4 py-3 text-sm font-semibold text-slate-700 hover:bg-slate-50 disabled:opacity-50"
+              >Cancel</button>
+              <button
+                onClick={handleMoveAllAndDeleteCategory}
+                disabled={saving || !deleteTargetCategory}
+                className="rounded-xl bg-red-600 px-4 py-3 text-sm font-semibold text-white hover:bg-red-700 disabled:opacity-50"
+              >{saving ? "Moving songs..." : "Move Songs & Delete"}</button>
             </div>
           </div>
         </div>

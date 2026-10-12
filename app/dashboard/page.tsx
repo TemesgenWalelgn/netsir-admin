@@ -1,4 +1,3 @@
-
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
@@ -11,8 +10,7 @@ import {
   getDocs,
   Timestamp,
 } from "firebase/firestore";
-import { onAuthStateChanged } from "firebase/auth";
-
+import { onAuthStateChanged, User } from "firebase/auth";
 import {
   Music2,
   FolderOpen,
@@ -34,13 +32,14 @@ type Song = {
   lyrics: string;
   category: string;
   youtubeUrl?: string;
+  isUserCreated?: boolean;
   createdAt?: Timestamp | null;
   timestamp?: Timestamp | null;
 };
 
 type DashboardStats = {
   totalSongs: number;
-  totalCategories: number;
+  userCreatedCategories: number;
   songsWithAudio: number;
   recentSongs: Song[];
 };
@@ -50,7 +49,7 @@ export default function DashboardPage() {
 
   const [stats, setStats] = useState<DashboardStats>({
     totalSongs: 0,
-    totalCategories: 0,
+    userCreatedCategories: 0,
     songsWithAudio: 0,
     recentSongs: [],
   });
@@ -60,7 +59,7 @@ export default function DashboardPage() {
   const [error, setError] = useState("");
 
   const loadDashboard = useCallback(
-    async (showRefresh = false) => {
+    async (currentUser?: User | null, showRefresh = false) => {
       if (showRefresh) {
         setRefreshing(true);
       } else {
@@ -70,14 +69,14 @@ export default function DashboardPage() {
       setError("");
 
       try {
-        const user = auth.currentUser;
+        const user = currentUser ?? auth.currentUser;
 
         if (!user) {
           router.replace("/");
           return;
         }
 
-        // Verify admin account.
+        // Verify admin account
         const adminRef = doc(db, "admins", user.uid);
         const adminSnapshot = await getDoc(adminRef);
 
@@ -88,7 +87,7 @@ export default function DashboardPage() {
 
         const adminData = adminSnapshot.data();
 
-        if (adminData.role !== "admin") {
+        if (adminData?.role !== "admin") {
           router.replace("/");
           return;
         }
@@ -107,6 +106,7 @@ export default function DashboardPage() {
             lyrics: data.lyrics || "",
             category: data.category || "Uncategorized",
             youtubeUrl: data.youtubeUrl || "",
+            isUserCreated: data.isUserCreated === true,
             createdAt: data.createdAt || null,
             timestamp: data.timestamp || null,
           };
@@ -115,6 +115,43 @@ export default function DashboardPage() {
         const songsWithAudio = songs.filter(
           (song) => song.youtubeUrl?.trim()
         ).length;
+
+        // Count distinct categories created by users
+        const normalizeCategory = (value: unknown) =>
+          String(value ?? "").trim().replace(/\s+/g, " ").toLocaleLowerCase();
+
+        const userCategoryNames = new Set<string>();
+
+        categoriesSnapshot.docs.forEach((categoryDoc) => {
+          const data = categoryDoc.data();
+          const hasUserCreator =
+            data.isUserCreated === true ||
+            Boolean(
+              data.createdByUid ||
+              data.createdByEmail ||
+              data.userId ||
+              data.ownerId ||
+              data.createdBy
+            );
+          const categoryName = normalizeCategory(
+            data.name || data.category || data.title
+          );
+
+          if (hasUserCreator && categoryName) {
+            userCategoryNames.add(categoryName);
+          }
+        });
+
+        songs.forEach((song) => {
+          const categoryName = normalizeCategory(song.category);
+          if (
+            song.isUserCreated &&
+            categoryName &&
+            categoryName !== "uncategorized"
+          ) {
+            userCategoryNames.add(categoryName);
+          }
+        });
 
         const sortedSongs = [...songs].sort((a, b) => {
           const getTime = (song: Song) => {
@@ -134,7 +171,7 @@ export default function DashboardPage() {
 
         setStats({
           totalSongs: songs.length,
-          totalCategories: categoriesSnapshot.size,
+          userCreatedCategories: userCategoryNames.size,
           songsWithAudio,
           recentSongs: sortedSongs.slice(0, 6),
         });
@@ -156,7 +193,7 @@ export default function DashboardPage() {
         return;
       }
 
-      loadDashboard();
+      loadDashboard(user);
     });
 
     return () => unsubscribe();
@@ -179,6 +216,11 @@ export default function DashboardPage() {
   function getInitial(title: string) {
     return title.trim().charAt(0) || "♪";
   }
+
+  const audioPercentage =
+    stats.totalSongs > 0
+      ? Math.round((stats.songsWithAudio / stats.totalSongs) * 100)
+      : 0;
 
   if (loading) {
     return (
@@ -224,7 +266,7 @@ export default function DashboardPage() {
         <div className="flex items-center gap-3">
           <button
             type="button"
-            onClick={() => loadDashboard(true)}
+            onClick={() => loadDashboard(auth.currentUser, true)}
             disabled={refreshing}
             className="inline-flex items-center gap-2 rounded-xl border border-slate-200 bg-white px-4 py-2.5 text-sm font-medium text-slate-700 shadow-sm transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-60"
           >
@@ -287,11 +329,11 @@ export default function DashboardPage() {
               </p>
 
               <p className="mt-3 text-3xl font-bold tracking-tight text-slate-900">
-                {stats.totalCategories}
+                {stats.userCreatedCategories}
               </p>
 
               <p className="mt-1 text-xs text-slate-400">
-                Available categories
+                Categories created by users
               </p>
             </div>
 
@@ -333,12 +375,7 @@ export default function DashboardPage() {
               </p>
 
               <p className="mt-3 text-3xl font-bold tracking-tight text-slate-900">
-                {stats.totalSongs > 0
-                  ? Math.round(
-                      (stats.songsWithAudio / stats.totalSongs) * 100
-                    )
-                  : 0}
-                %
+                {audioPercentage}%
               </p>
 
               <p className="mt-1 text-xs text-slate-400">
@@ -541,33 +578,19 @@ export default function DashboardPage() {
               </span>
 
               <span className="text-xs font-semibold text-slate-800">
-                {stats.totalSongs > 0
-                  ? Math.round(
-                      (stats.songsWithAudio / stats.totalSongs) * 100
-                    )
-                  : 0}
-                %
+                {audioPercentage}%
               </span>
             </div>
 
             <div className="h-2 overflow-hidden rounded-full bg-slate-200">
               <div
                 className="h-full rounded-full bg-emerald-500 transition-all duration-500"
-                style={{
-                  width: `${
-                    stats.totalSongs > 0
-                      ? Math.round(
-                          (stats.songsWithAudio / stats.totalSongs) * 100
-                        )
-                      : 0
-                  }%`,
-                }}
+                style={{ width: `${audioPercentage}%` }}
               />
             </div>
 
             <p className="mt-2 text-[11px] text-slate-400">
-              {stats.songsWithAudio} of {stats.totalSongs} songs have
-              audio links.
+              {stats.songsWithAudio} of {stats.totalSongs} songs have audio links.
             </p>
           </div>
         </div>
