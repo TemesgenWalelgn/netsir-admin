@@ -43,6 +43,8 @@ import {
   Circle,
   ListMusic,
   Clock3,
+  Copy,
+  AlertTriangle,
 } from "lucide-react";
 
 import { auth, db } from "@/lib/firebase";
@@ -65,11 +67,28 @@ type Category = {
   name: string;
 };
 
+type DuplicateGroup = {
+  key: string;
+  title: string;
+  songs: Song[];
+};
+
 type ModalType = "view" | "edit" | "add" | null;
 
 type SearchType = "all" | "name" | "category" | "lyrics";
 
 type SortOrder = "default" | "asc" | "desc";
+
+// Duplicate matching is based on song title, ignoring capitalization,
+// spaces, and punctuation. Lyrics are shown so the admin can compare
+// versions before choosing which song to keep.
+function normalizeDuplicateTitle(title: string) {
+  return title
+    .normalize("NFKC")
+    .toLocaleLowerCase()
+    .replace(/[\s\p{P}\p{S}]+/gu, "")
+    .trim();
+}
 
 export default function SongsPage() {
   const router = useRouter();
@@ -80,6 +99,12 @@ export default function SongsPage() {
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState("");
+
+  // Duplicate review
+  const [showDuplicates, setShowDuplicates] = useState(false);
+  const [keepSongByGroup, setKeepSongByGroup] = useState<Record<string, string>>({});
+  const [duplicateDeletingId, setDuplicateDeletingId] = useState("");
+  const [duplicateSuccess, setDuplicateSuccess] = useState("");
 
   // Search and filters
   const [search, setSearch] = useState("");
@@ -120,6 +145,7 @@ export default function SongsPage() {
       }
 
       setError("");
+      setDuplicateSuccess("");
 
       try {
         const user = auth.currentUser;
@@ -227,6 +253,42 @@ export default function SongsPage() {
       a.localeCompare(b, "am")
     );
   }, [categories, songs]);
+
+  // Find title-duplicate groups across all loaded songs.
+  // This is intentionally separate from the visible search filters.
+  const duplicateGroups = useMemo<DuplicateGroup[]>(() => {
+    const grouped = new Map<string, Song[]>();
+
+    songs.forEach((song) => {
+      const key = normalizeDuplicateTitle(song.title);
+      if (!key) return;
+
+      const group = grouped.get(key) || [];
+      group.push(song);
+      grouped.set(key, group);
+    });
+
+    return Array.from(grouped.entries())
+      .filter(([, groupSongs]) => groupSongs.length > 1)
+      .map(([key, groupSongs]) => ({
+        key,
+        title: groupSongs[0]?.title || "Untitled",
+        songs: [...groupSongs].sort((a, b) => {
+          const aDate = a.createdAt?.toMillis() ?? a.timestamp?.toMillis() ?? 0;
+          const bDate = b.createdAt?.toMillis() ?? b.timestamp?.toMillis() ?? 0;
+          return aDate - bDate;
+        }),
+      }))
+      .sort((a, b) => a.title.localeCompare(b.title, "am", { sensitivity: "base" }));
+  }, [songs]);
+
+  const duplicateExtraCount = useMemo(
+    () => duplicateGroups.reduce(
+      (total, group) => total + group.songs.length - 1,
+      0
+    ),
+    [duplicateGroups]
+  );
 
   // Search + category filtering + alphabetical sorting.
   //
@@ -429,11 +491,11 @@ export default function SongsPage() {
       }
 
       const normalizedTitle =
-        title.trim().toLowerCase();
+        normalizeDuplicateTitle(title);
 
       const duplicate = songs.find(
         (song) =>
-          song.title.trim().toLowerCase() ===
+          normalizeDuplicateTitle(song.title) ===
             normalizedTitle &&
           song.id !== selectedSong?.id
       );
@@ -591,6 +653,100 @@ export default function SongsPage() {
     }
   }
 
+  // Delete copies from one duplicate-title group while preserving
+  // the one song explicitly selected by the admin.
+  async function deleteDuplicateCopies(group: DuplicateGroup) {
+    if (duplicateDeletingId || deleting || saving) return;
+
+    const keeperId = keepSongByGroup[group.key];
+    const keeper = group.songs.find((song) => song.id === keeperId);
+
+    if (!keeper) {
+      setError("Choose which song to keep before deleting duplicates.");
+      return;
+    }
+
+    const duplicateCopies = group.songs.filter(
+      (song) => song.id !== keeper.id
+    );
+
+    if (duplicateCopies.length === 0) return;
+
+    const confirmed = window.confirm(
+      `Keep "${keeper.title}" and permanently delete ${duplicateCopies.length} other song(s) with the same title?\n\nThe song you selected to keep will not be deleted. Compare the lyrics and category before continuing.`
+    );
+
+    if (!confirmed) return;
+
+    setDuplicateDeletingId(group.key);
+    setError("");
+    setDuplicateSuccess("");
+
+    const deletedIds: string[] = [];
+
+    try {
+      const user = auth.currentUser;
+
+      if (!user) {
+        router.replace("/");
+        setError("Your session has expired. Please sign in again.");
+        return;
+      }
+
+      // Re-check administrator access before destructive changes.
+      const adminSnapshot = await getDoc(
+        doc(db, "admins", user.uid)
+      );
+
+      if (
+        !adminSnapshot.exists() ||
+        adminSnapshot.data()?.role !== "admin"
+      ) {
+        setError("Only an administrator can delete duplicate songs.");
+        router.replace("/");
+        return;
+      }
+
+      // Delete sequentially so successful deletions are tracked if one fails.
+      for (const duplicate of duplicateCopies) {
+        await deleteDoc(
+          doc(db, "shared_songs", duplicate.id)
+        );
+        deletedIds.push(duplicate.id);
+      }
+
+      setDuplicateSuccess(
+        `Removed ${deletedIds.length} duplicate song copy/copies. Kept "${keeper.title}".`
+      );
+    } catch (err) {
+      console.error("Delete duplicate songs error:", err);
+      if (deletedIds.length > 0) {
+        setError(
+          `Deleted ${deletedIds.length} duplicate copy/copies, but one or more remaining copies could not be deleted. Refresh and review the group again.`
+        );
+      } else {
+        setError(
+          "Unable to delete duplicate songs. Check Firestore permissions and try again."
+        );
+      }
+    } finally {
+      // Reflect any deletions that succeeded, even if another deletion failed.
+      if (deletedIds.length > 0) {
+        setSongs((current) =>
+          current.filter((song) => !deletedIds.includes(song.id))
+        );
+        setSelectedIds((current) =>
+          current.filter((id) => !deletedIds.includes(id))
+        );
+        if (selectedSong && deletedIds.includes(selectedSong.id)) {
+          setSelectedSong(null);
+          setModal(null);
+        }
+      }
+      setDuplicateDeletingId("");
+    }
+  }
+
   function formatDate(song: Song) {
     const date = song.createdAt || song.timestamp;
 
@@ -648,7 +804,26 @@ export default function SongsPage() {
           </p>
         </div>
 
-        <div className="flex items-center gap-3">
+        <div className="flex flex-wrap items-center gap-3">
+          <button
+            type="button"
+            onClick={() => {
+              setShowDuplicates((current) => !current);
+              setDuplicateSuccess("");
+            }}
+            className={`inline-flex items-center gap-2 rounded-xl border px-4 py-2.5 text-sm font-semibold shadow-sm transition ${
+              showDuplicates
+                ? "border-amber-300 bg-amber-50 text-amber-800"
+                : "border-amber-200 bg-white text-amber-700 hover:bg-amber-50"
+            }`}
+          >
+            <Copy size={16} />
+            {showDuplicates ? "Hide Duplicates" : "Find Duplicates"}
+            <span className="rounded-full bg-amber-100 px-2 py-0.5 text-xs font-bold text-amber-800">
+              {duplicateExtraCount}
+            </span>
+          </button>
+
           <button
             type="button"
             onClick={() => loadData(true)}
@@ -690,6 +865,172 @@ export default function SongsPage() {
             <X size={16} />
           </button>
         </div>
+      )}
+
+      {/* Duplicate review panel */}
+      {showDuplicates && (
+        <section className="overflow-hidden rounded-2xl border border-amber-200 bg-white shadow-sm">
+          <div className="flex flex-col gap-3 border-b border-amber-100 bg-amber-50/70 px-5 py-4 sm:flex-row sm:items-center sm:justify-between sm:px-6">
+            <div>
+              <div className="flex items-center gap-2 text-amber-800">
+                <AlertTriangle size={18} />
+                <h2 className="font-semibold">Duplicate Songs</h2>
+              </div>
+              <p className="mt-1 text-xs leading-5 text-amber-800/80">
+                Found {duplicateGroups.length} duplicate title group(s) and {duplicateExtraCount} extra copy/copies. Titles are compared without case, spaces, or punctuation. Check each song's lyrics before deleting.
+              </p>
+            </div>
+            <button
+              type="button"
+              onClick={() => loadData(true)}
+              disabled={refreshing || !!duplicateDeletingId}
+              className="inline-flex items-center justify-center gap-2 rounded-xl border border-amber-200 bg-white px-3.5 py-2 text-xs font-semibold text-amber-800 hover:bg-amber-100 disabled:opacity-60"
+            >
+              <RefreshCw size={14} className={refreshing ? "animate-spin" : ""} />
+              Refresh duplicate scan
+            </button>
+          </div>
+
+          {duplicateSuccess && (
+            <div className="border-b border-emerald-100 bg-emerald-50 px-5 py-3 text-sm text-emerald-700 sm:px-6">
+              <span className="inline-flex items-start gap-2">
+                <CheckCircle2 size={17} className="mt-0.5 shrink-0" />
+                {duplicateSuccess}
+              </span>
+            </div>
+          )}
+
+          {duplicateGroups.length === 0 ? (
+            <div className="flex min-h-48 flex-col items-center justify-center px-6 py-10 text-center">
+              <div className="mb-3 flex h-12 w-12 items-center justify-center rounded-2xl bg-emerald-50 text-emerald-600">
+                <CheckCircle2 size={23} />
+              </div>
+              <p className="font-semibold text-slate-800">No duplicate titles found</p>
+              <p className="mt-1 max-w-md text-sm leading-6 text-slate-500">
+                Every song title is unique according to the current matching rules.
+              </p>
+            </div>
+          ) : (
+            <div className="divide-y divide-slate-100">
+              {duplicateGroups.map((group) => {
+                const keeperId = keepSongByGroup[group.key] || "";
+                const isDeletingThisGroup = duplicateDeletingId === group.key;
+
+                return (
+                  <div key={group.key} className="p-4 sm:p-6">
+                    <div className="mb-4 flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+                      <div>
+                        <h3 className="break-words text-base font-bold text-slate-900">
+                          {group.title || "Untitled"}
+                        </h3>
+                        <p className="mt-1 text-xs text-slate-500">
+                          {group.songs.length} songs share this title. Select the one to keep; the others will be deleted.
+                        </p>
+                      </div>
+                      <span className="inline-flex w-fit shrink-0 items-center rounded-full bg-amber-100 px-3 py-1 text-xs font-semibold text-amber-800">
+                        {group.songs.length - 1} extra {group.songs.length - 1 === 1 ? "copy" : "copies"}
+                      </span>
+                    </div>
+
+                    <div className="grid gap-3 lg:grid-cols-2">
+                      {group.songs.map((song) => {
+                        const isKeeper = keeperId === song.id;
+
+                        return (
+                          <label
+                            key={song.id}
+                            className={`block cursor-pointer rounded-xl border p-4 transition ${
+                              isKeeper
+                                ? "border-emerald-400 bg-emerald-50/70 ring-2 ring-emerald-100"
+                                : "border-slate-200 bg-white hover:border-slate-300 hover:bg-slate-50"
+                            }`}
+                          >
+                            <div className="flex items-start gap-3">
+                              <input
+                                type="radio"
+                                name={`keep-duplicate-${group.key}`}
+                                checked={isKeeper}
+                                onChange={() => {
+                                  setKeepSongByGroup((current) => ({
+                                    ...current,
+                                    [group.key]: song.id,
+                                  }));
+                                  setDuplicateSuccess("");
+                                }}
+                                disabled={!!duplicateDeletingId}
+                                className="mt-1 h-4 w-4 accent-emerald-600"
+                              />
+                              <div className="min-w-0 flex-1">
+                                <div className="flex flex-wrap items-center gap-2">
+                                  <p className="break-words text-sm font-semibold text-slate-800">
+                                    {song.title || "Untitled"}
+                                  </p>
+                                  {isKeeper && (
+                                    <span className="rounded-full bg-emerald-100 px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide text-emerald-700">
+                                      Keep this one
+                                    </span>
+                                  )}
+                                </div>
+                                <div className="mt-2 flex flex-wrap gap-2 text-[11px] text-slate-500">
+                                  <span className="rounded-md bg-slate-100 px-2 py-1">
+                                    {song.category || "Uncategorized"}
+                                  </span>
+                                  <span className="rounded-md bg-slate-100 px-2 py-1">
+                                    {formatDate(song)}
+                                  </span>
+                                  {song.youtubeUrl && (
+                                    <a
+                                      href={song.youtubeUrl}
+                                      target="_blank"
+                                      rel="noopener noreferrer"
+                                      onClick={(event) => event.stopPropagation()}
+                                      className="inline-flex items-center gap-1 rounded-md bg-blue-50 px-2 py-1 font-medium text-blue-700 hover:bg-blue-100"
+                                    >
+                                      <ExternalLink size={11} /> Audio
+                                    </a>
+                                  )}
+                                </div>
+                                <p className="mt-3 whitespace-pre-wrap break-words text-xs leading-5 text-slate-600">
+                                  {song.lyrics
+                                    ? `${song.lyrics.slice(0, 260)}${song.lyrics.length > 260 ? "…" : ""}`
+                                    : "No lyrics available."}
+                                </p>
+                                <p className="mt-3 break-all font-mono text-[10px] text-slate-400">
+                                  ID: {song.id}
+                                </p>
+                              </div>
+                            </div>
+                          </label>
+                        );
+                      })}
+                    </div>
+
+                    <div className="mt-4 flex flex-col gap-3 border-t border-slate-100 pt-4 sm:flex-row sm:items-center sm:justify-between">
+                      <p className="text-xs leading-5 text-slate-500">
+                        {keeperId
+                          ? `The selected song will remain. ${group.songs.length - 1} other copy/copies will be deleted.`
+                          : "Choose the song you want to keep before deleting the other copies."}
+                      </p>
+                      <button
+                        type="button"
+                        onClick={() => void deleteDuplicateCopies(group)}
+                        disabled={!keeperId || !!duplicateDeletingId || deleting || saving}
+                        className="inline-flex shrink-0 items-center justify-center gap-2 rounded-xl bg-red-600 px-4 py-2.5 text-sm font-semibold text-white shadow-sm transition hover:bg-red-700 disabled:cursor-not-allowed disabled:opacity-50"
+                      >
+                        {isDeletingThisGroup ? (
+                          <RefreshCw size={16} className="animate-spin" />
+                        ) : (
+                          <Trash2 size={16} />
+                        )}
+                        {isDeletingThisGroup ? "Deleting duplicates..." : "Delete duplicates, keep selected"}
+                      </button>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </section>
       )}
 
       {/* Statistics */}

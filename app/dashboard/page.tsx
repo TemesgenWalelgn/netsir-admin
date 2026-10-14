@@ -1,3 +1,4 @@
+
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
@@ -22,6 +23,7 @@ import {
   AlertCircle,
   BarChart3,
   ExternalLink,
+  Flag,
 } from "lucide-react";
 
 import { auth, db } from "@/lib/firebase";
@@ -41,6 +43,7 @@ type DashboardStats = {
   totalSongs: number;
   userCreatedCategories: number;
   songsWithAudio: number;
+  pendingReports: number;
   recentSongs: Song[];
 };
 
@@ -51,6 +54,7 @@ export default function DashboardPage() {
     totalSongs: 0,
     userCreatedCategories: 0,
     songsWithAudio: 0,
+    pendingReports: 0,
     recentSongs: [],
   });
 
@@ -92,9 +96,14 @@ export default function DashboardPage() {
           return;
         }
 
-        const [songsSnapshot, categoriesSnapshot] = await Promise.all([
+        const [
+          songsSnapshot,
+          categoriesSnapshot,
+          reportsSnapshot,
+        ] = await Promise.all([
           getDocs(collection(db, "shared_songs")),
           getDocs(collection(db, "categories")),
+          getDocs(collection(db, "song_reports")),
         ]);
 
         const songs: Song[] = songsSnapshot.docs.map((songDoc) => {
@@ -116,23 +125,33 @@ export default function DashboardPage() {
           (song) => song.youtubeUrl?.trim()
         ).length;
 
+        // Count pending song reports
+        const pendingReports = reportsSnapshot.docs.filter(
+          (reportDoc) => reportDoc.data().status === "pending"
+        ).length;
+
         // Count distinct categories created by users
         const normalizeCategory = (value: unknown) =>
-          String(value ?? "").trim().replace(/\s+/g, " ").toLocaleLowerCase();
+          String(value ?? "")
+            .trim()
+            .replace(/\s+/g, " ")
+            .toLocaleLowerCase();
 
         const userCategoryNames = new Set<string>();
 
         categoriesSnapshot.docs.forEach((categoryDoc) => {
           const data = categoryDoc.data();
+
           const hasUserCreator =
             data.isUserCreated === true ||
             Boolean(
               data.createdByUid ||
-              data.createdByEmail ||
-              data.userId ||
-              data.ownerId ||
-              data.createdBy
+                data.createdByEmail ||
+                data.userId ||
+                data.ownerId ||
+                data.createdBy
             );
+
           const categoryName = normalizeCategory(
             data.name || data.category || data.title
           );
@@ -144,6 +163,7 @@ export default function DashboardPage() {
 
         songs.forEach((song) => {
           const categoryName = normalizeCategory(song.category);
+
           if (
             song.isUserCreated &&
             categoryName &&
@@ -156,8 +176,6 @@ export default function DashboardPage() {
         const sortedSongs = [...songs].sort((a, b) => {
           const getTime = (song: Song) => {
             const date = song.createdAt || song.timestamp;
-
-            if (!date) return 0;
 
             if (date instanceof Timestamp) {
               return date.toMillis();
@@ -173,6 +191,7 @@ export default function DashboardPage() {
           totalSongs: songs.length,
           userCreatedCategories: userCategoryNames.size,
           songsWithAudio,
+          pendingReports,
           recentSongs: sortedSongs.slice(0, 6),
         });
       } catch (err) {
@@ -193,7 +212,7 @@ export default function DashboardPage() {
         return;
       }
 
-      loadDashboard(user);
+      void loadDashboard(user);
     });
 
     return () => unsubscribe();
@@ -230,8 +249,8 @@ export default function DashboardPage() {
           <div className="mt-3 h-4 w-72 rounded bg-slate-200" />
         </div>
 
-        <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
-          {[1, 2, 3, 4].map((item) => (
+        <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-5">
+          {[1, 2, 3, 4, 5].map((item) => (
             <div
               key={item}
               className="h-32 animate-pulse rounded-2xl border border-slate-200 bg-white"
@@ -296,7 +315,7 @@ export default function DashboardPage() {
       )}
 
       {/* Statistics */}
-      <section className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+      <section className="grid gap-4 sm:grid-cols-2 xl:grid-cols-5">
         {/* Total songs */}
         <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm transition hover:-translate-y-0.5 hover:shadow-md">
           <div className="flex items-start justify-between">
@@ -387,6 +406,37 @@ export default function DashboardPage() {
               <CheckCircle2 size={21} />
             </div>
           </div>
+        </div>
+
+        {/* Pending reports */}
+        <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm transition hover:-translate-y-0.5 hover:shadow-md">
+          <div className="flex items-start justify-between">
+            <div>
+              <p className="text-sm font-medium text-slate-500">
+                Pending Reports
+              </p>
+
+              <p className="mt-3 text-3xl font-bold tracking-tight text-slate-900">
+                {stats.pendingReports}
+              </p>
+
+              <p className="mt-1 text-xs text-slate-400">
+                Reports awaiting review
+              </p>
+            </div>
+
+            <div className="flex h-11 w-11 items-center justify-center rounded-xl bg-red-50 text-red-600">
+              <Flag size={21} />
+            </div>
+          </div>
+
+          <Link
+            href="/dashboard/reports"
+            className="mt-4 inline-flex items-center gap-1.5 text-sm font-medium text-red-600 hover:text-red-700"
+          >
+            Review reports
+            <ArrowRight size={15} />
+          </Link>
         </div>
       </section>
 
@@ -566,6 +616,37 @@ export default function DashboardPage() {
               <ArrowRight
                 size={16}
                 className="text-slate-300 transition group-hover:text-violet-500"
+              />
+            </Link>
+
+            {/* Song Reports */}
+            <Link
+              href="/dashboard/reports"
+              className="group flex items-center gap-3 rounded-xl border border-slate-200 p-3.5 transition hover:border-red-200 hover:bg-red-50"
+            >
+              <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-red-50 text-red-600 group-hover:bg-white">
+                <Flag size={19} />
+              </div>
+
+              <div className="flex-1">
+                <p className="text-sm font-semibold text-slate-800">
+                  Song Reports
+                </p>
+
+                <p className="mt-0.5 text-xs text-slate-400">
+                  Review incorrect lyrics and song details
+                </p>
+              </div>
+
+              {stats.pendingReports > 0 && (
+                <span className="rounded-full bg-red-100 px-2 py-1 text-xs font-semibold text-red-700">
+                  {stats.pendingReports}
+                </span>
+              )}
+
+              <ArrowRight
+                size={16}
+                className="text-slate-300 transition group-hover:text-red-500"
               />
             </Link>
           </div>

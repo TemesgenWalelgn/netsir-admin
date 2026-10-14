@@ -1,4 +1,3 @@
-
 "use client";
 
 import { ReactNode, useEffect, useState } from "react";
@@ -8,11 +7,11 @@ import { onAuthStateChanged, signOut } from "firebase/auth";
 import { auth } from "@/lib/firebase";
 import { DashboardDataProvider } from "@/lib/dashboard-data";
 
-
 import {
   LayoutDashboard,
   Music2,
   FolderOpen,
+  Flag,
   Settings,
   LogOut,
   Menu,
@@ -40,6 +39,11 @@ const navigation = [
     name: "Categories",
     href: "/dashboard/categories",
     icon: FolderOpen,
+  },
+  {
+    name: "Reports",
+    href: "/dashboard/reports",
+    icon: Flag,
   },
   {
     name: "Settings",
