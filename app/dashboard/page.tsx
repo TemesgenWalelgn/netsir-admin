@@ -24,6 +24,7 @@ import {
   BarChart3,
   ExternalLink,
   Flag,
+  Video,
 } from "lucide-react";
 
 import { auth, db } from "@/lib/firebase";
@@ -616,6 +617,31 @@ export default function DashboardPage() {
               <ArrowRight
                 size={16}
                 className="text-slate-300 transition group-hover:text-violet-500"
+              />
+            </Link>
+
+            {/* Tutorial Settings */}
+            <Link
+              href="/dashboard/tutorial"
+              className="group flex items-center gap-3 rounded-xl border border-slate-200 p-3.5 transition hover:border-rose-200 hover:bg-rose-50"
+            >
+              <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-rose-50 text-rose-600 group-hover:bg-white">
+                <Video size={19} />
+              </div>
+
+              <div className="flex-1">
+                <p className="text-sm font-semibold text-slate-800">
+                  Tutorial Settings
+                </p>
+
+                <p className="mt-0.5 text-xs text-slate-400">
+                  Manage the app tutorial video and description
+                </p>
+              </div>
+
+              <ArrowRight
+                size={16}
+                className="text-slate-300 transition group-hover:text-rose-500"
               />
             </Link>
 

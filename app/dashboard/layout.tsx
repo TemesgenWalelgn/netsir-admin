@@ -1,3 +1,4 @@
+
 "use client";
 
 import { ReactNode, useEffect, useState } from "react";
@@ -18,6 +19,7 @@ import {
   X,
   ChevronRight,
   ShieldCheck,
+  Video,
 } from "lucide-react";
 
 type DashboardLayoutProps = {
@@ -44,6 +46,11 @@ const navigation = [
     name: "Reports",
     href: "/dashboard/reports",
     icon: Flag,
+  },
+  {
+    name: "Tutorial Settings",
+    href: "/dashboard/tutorial",
+    icon: Video,
   },
   {
     name: "Settings",
@@ -81,8 +88,12 @@ export default function DashboardLayout({
   }, [pathname]);
 
   async function handleSignOut() {
-    await signOut(auth);
-    router.replace("/");
+    try {
+      await signOut(auth);
+      router.replace("/");
+    } catch (error) {
+      console.error("Sign out failed:", error);
+    }
   }
 
   if (checkingAuth) {
@@ -103,7 +114,17 @@ export default function DashboardLayout({
 
   const currentPage =
     navigation.find((item) => item.href === pathname)?.name ||
-    "Dashboard";
+    (pathname.startsWith("/dashboard/tutorial")
+      ? "Tutorial Settings"
+      : pathname.startsWith("/dashboard/songs")
+        ? "Songs"
+        : pathname.startsWith("/dashboard/categories")
+          ? "Categories"
+          : pathname.startsWith("/dashboard/reports")
+            ? "Reports"
+            : pathname.startsWith("/dashboard/settings")
+              ? "Settings"
+              : "Dashboard");
 
   return (
     <DashboardDataProvider>
@@ -144,6 +165,7 @@ export default function DashboardLayout({
 
             <button
               type="button"
+              aria-label="Close sidebar"
               onClick={() => setMobileOpen(false)}
               className="rounded-lg p-2 text-slate-400 hover:bg-slate-100 hover:text-slate-700 lg:hidden"
             >
@@ -169,6 +191,7 @@ export default function DashboardLayout({
                   <Link
                     key={item.href}
                     href={item.href}
+                    aria-current={isActive ? "page" : undefined}
                     className={`group flex items-center gap-3 rounded-xl px-3 py-3 text-sm font-medium transition ${
                       isActive
                         ? "bg-emerald-50 text-emerald-700"
@@ -227,7 +250,7 @@ export default function DashboardLayout({
               onClick={handleSignOut}
               className="flex w-full items-center gap-3 rounded-xl px-3 py-3 text-sm font-medium text-slate-600 transition hover:bg-red-50 hover:text-red-600"
             >
-              <span className="flex h-9 w-9 items-center justify-center rounded-lg bg-slate-100 transition group-hover:bg-red-100">
+              <span className="flex h-9 w-9 items-center justify-center rounded-lg bg-slate-100 transition">
                 <LogOut size={18} />
               </span>
 
@@ -241,6 +264,7 @@ export default function DashboardLayout({
             <div className="flex items-center gap-3">
               <button
                 type="button"
+                aria-label="Open menu"
                 onClick={() => setMobileOpen(true)}
                 className="rounded-xl border border-slate-200 bg-white p-2.5 text-slate-600 shadow-sm hover:bg-slate-50 lg:hidden"
               >
